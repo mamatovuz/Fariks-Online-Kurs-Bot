@@ -20,7 +20,20 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
-CLIENT_DIR = ROOT_DIR / "client"
+
+
+def find_client_dir() -> Path:
+    candidates = [
+        ROOT_DIR / "client",
+        BASE_DIR / "client",
+    ]
+    for candidate in candidates:
+        if (candidate / "index.html").exists():
+            return candidate
+    return ROOT_DIR / "client"
+
+
+CLIENT_DIR = find_client_dir()
 
 
 def load_env(path: Path) -> None:
