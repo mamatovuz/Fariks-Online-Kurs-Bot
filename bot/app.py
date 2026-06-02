@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hmac
+import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -91,9 +93,70 @@ API_PORT = int(clean_env("PORT") or clean_env("API_PORT") or "8080")
 DEFAULT_PUBLIC_CLIENT_URL = f"https://{RAILWAY_PUBLIC_DOMAIN}" if RAILWAY_PUBLIC_DOMAIN else f"http://localhost:{API_PORT}"
 PUBLIC_CLIENT_URL = normalize_public_url(clean_env("PUBLIC_CLIENT_URL", DEFAULT_PUBLIC_CLIENT_URL))
 ADMIN_TOKEN = clean_env("ADMIN_TOKEN", "change-me")
+APP_SECRET = clean_env("APP_SECRET") or ADMIN_TOKEN or BOT_TOKEN or "fariks-lms-dev-secret"
+ADMIN_TELEGRAM_IDS = {
+    int(item)
+    for item in re.split(r"[,\s]+", clean_env("ADMIN_TELEGRAM_IDS") or clean_env("ADMIN_TELEGRAM_ID") or ADMIN_TOKEN)
+    if item.strip().lstrip("-").isdigit()
+}
 DB_PATH = Path(clean_env("DB_PATH", str(BASE_DIR / "fariks_lms.sqlite3")))
 if not DB_PATH.is_absolute():
     DB_PATH = BASE_DIR / DB_PATH
+
+
+def b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def b64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+def create_signed_token(kind: str, payload: dict, expires_at: datetime) -> str:
+    body = {
+        "kind": kind,
+        "exp": int(expires_at.timestamp()),
+        "payload": payload,
+    }
+    encoded_body = b64url_encode(json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(APP_SECRET.encode("utf-8"), encoded_body.encode("ascii"), hashlib.sha256).digest()
+    return f"{kind}.{encoded_body}.{b64url_encode(signature)}"
+
+
+def read_signed_token(token: str, expected_kind: str) -> dict:
+    try:
+        kind, encoded_body, encoded_signature = token.split(".", 2)
+        if kind != expected_kind:
+            raise ValueError
+        expected_signature = hmac.new(APP_SECRET.encode("utf-8"), encoded_body.encode("ascii"), hashlib.sha256).digest()
+        if not hmac.compare_digest(b64url_decode(encoded_signature), expected_signature):
+            raise ValueError
+        body = json.loads(b64url_decode(encoded_body).decode("utf-8"))
+        if body.get("kind") != expected_kind:
+            raise ValueError
+        if int(body.get("exp", 0)) < int(datetime.now(timezone.utc).timestamp()):
+            raise TimeoutError
+        return body
+    except TimeoutError:
+        raise ValueError("Link muddati tugagan")
+    except Exception as error:
+        if isinstance(error, ValueError) and str(error):
+            raise
+        raise ValueError("Link noto'g'ri yoki eskirgan")
+
+
+def create_admin_session_token(telegram_id: int, name: str, username: str = "") -> str:
+    return create_signed_token(
+        "admin",
+        {"telegram_id": telegram_id, "name": name, "username": username, "login_method": "telegram"},
+        datetime.now(timezone.utc) + timedelta(days=14),
+    )
+
+
+def read_admin_session_token(token: str) -> dict:
+    body = read_signed_token(token, "admin")
+    return dict(body.get("payload") or {})
 
 
 def now_iso() -> str:
@@ -659,8 +722,19 @@ class Database:
         if not self.is_lesson_unlocked(user_id, lesson_id):
             raise ValueError("Bu dars hali ochilmagan")
 
-        token = uuid.uuid4().hex
-        expires_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        user = self.get_user(user_id) or {"full_name": "", "phone": ""}
+        expires_at_dt = datetime.now(timezone.utc) + timedelta(hours=2)
+        token = create_signed_token(
+            "test",
+            {
+                "user_id": user_id,
+                "lesson_id": lesson_id,
+                "full_name": user.get("full_name", ""),
+                "phone": user.get("phone", ""),
+            },
+            expires_at_dt,
+        )
+        expires_at = expires_at_dt.isoformat()
         with self.connection() as conn:
             conn.execute(
                 """
@@ -689,7 +763,56 @@ class Database:
             ).fetchone()
 
         if not row:
-            raise ValueError("Test token topilmadi")
+            body = read_signed_token(token, "test")
+            claims = dict(body.get("payload") or {})
+            user_id = int(claims.get("user_id") or 0)
+            lesson_id = int(claims.get("lesson_id") or 0)
+            lesson = self.get_lesson(lesson_id)
+            if not user_id or not lesson:
+                raise ValueError("Test token topilmadi")
+            if lesson_slug and lesson["slug"] != lesson_slug:
+                raise ValueError("Test link boshqa dars uchun berilgan")
+
+            full_name = str(claims.get("full_name") or "Telegram foydalanuvchi").strip()
+            phone = str(claims.get("phone") or "-").strip()
+            with self.connection() as conn:
+                existing_user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (user_id,)).fetchone()
+                if not existing_user:
+                    conn.execute(
+                        """
+                        INSERT INTO users (telegram_id, full_name, phone, registered_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (user_id, full_name, phone, now_iso()),
+                    )
+                else:
+                    full_name = existing_user["full_name"]
+                    phone = existing_user["phone"]
+                conn.execute(
+                    """
+                    INSERT INTO enrollments (user_id, course_id, status, created_at)
+                    VALUES (?, ?, 'active', ?)
+                    ON CONFLICT(user_id, course_id) DO UPDATE SET status = 'active'
+                    """,
+                    (user_id, lesson["course_id"], now_iso()),
+                )
+
+            return {
+                "token": token,
+                "user_id": user_id,
+                "lesson_id": lesson_id,
+                "expires_at": datetime.fromtimestamp(int(body["exp"]), timezone.utc).isoformat(),
+                "created_at": now_iso(),
+                "slug": lesson["slug"],
+                "lesson_title": lesson["title"],
+                "duration_minutes": lesson["duration_minutes"],
+                "pass_percent": lesson["pass_percent"],
+                "module_title": lesson["module_title"],
+                "course_title": lesson["course_title"],
+                "course_id": lesson["course_id"],
+                "full_name": full_name,
+                "phone": phone,
+            }
 
         data = dict(row)
         expires_at = datetime.fromisoformat(data["expires_at"])
@@ -1123,8 +1246,13 @@ class FariksBot:
         chat_id = int(message["chat"]["id"])
         user_id = int(message["from"]["id"])
         text = str(message.get("text", "")).strip()
+        command = text.split()[0].split("@")[0] if text.startswith("/") else ""
 
-        if text == "/start":
+        if command == "/admin":
+            self.handle_admin_command(chat_id, user_id, message.get("from", {}))
+            return
+
+        if command == "/start":
             self.start(chat_id, user_id)
             return
 
@@ -1221,6 +1349,23 @@ class FariksBot:
             chat_id,
             "🎓 FARIKS O'quv Markaziga xush kelibsiz!\n\nOnline kurslardan foydalanish uchun ro'yxatdan o'ting.",
             {"inline_keyboard": [[{"text": "Ro'yxatdan o'tish", "callback_data": "register"}]]},
+        )
+
+    def handle_admin_command(self, chat_id: int, user_id: int, from_user: dict) -> None:
+        if user_id not in ADMIN_TELEGRAM_IDS:
+            self.telegram.send_message(chat_id, "Bu bo'lim faqat admin uchun.")
+            return
+
+        first_name = str(from_user.get("first_name") or "").strip()
+        last_name = str(from_user.get("last_name") or "").strip()
+        username = str(from_user.get("username") or "").strip()
+        name = " ".join(part for part in [first_name, last_name] if part).strip() or username or str(user_id)
+        token = create_admin_session_token(user_id, name, username)
+        link = f"{PUBLIC_CLIENT_URL}/admin?token={urllib.parse.quote(token)}"
+        self.telegram.send_message(
+            chat_id,
+            f"Admin kabinet:\n\n{link}",
+            {"inline_keyboard": [[{"text": "Admin kabinetga kirish", "url": link}]]},
         )
 
     def show_courses(self, chat_id: int) -> None:
@@ -1501,12 +1646,31 @@ def make_handler(db: Database, telegram: TelegramClient):
             self.end_headers()
             self.wfile.write(content)
 
-        def is_admin(self, query: dict[str, list[str]]) -> bool:
+        def get_admin_token(self, query: dict[str, list[str]]) -> str:
             token = self.headers.get("X-Admin-Token") or query.get("admin_token", [""])[0]
-            return hmac.compare_digest(token, ADMIN_TOKEN)
+            return token.strip()
+
+        def admin_claims(self, query: dict[str, list[str]]) -> dict | None:
+            token = self.get_admin_token(query)
+            if hmac.compare_digest(token, ADMIN_TOKEN):
+                return {"login_method": "token", "name": "Admin", "telegram_id": None, "username": ""}
+            try:
+                claims = read_admin_session_token(token)
+            except ValueError:
+                return None
+            telegram_id = int(claims.get("telegram_id") or 0)
+            if telegram_id and telegram_id in ADMIN_TELEGRAM_IDS:
+                return claims
+            return None
+
+        def is_admin(self, query: dict[str, list[str]]) -> bool:
+            return self.admin_claims(query) is not None
 
         def handle_admin_get(self, path: str) -> None:
-            if path == "/api/admin/summary":
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if path == "/api/admin/me":
+                self.send_json({"ok": True, "data": self.admin_claims(query)})
+            elif path == "/api/admin/summary":
                 self.send_json({"ok": True, "data": db.admin_summary()})
             elif path == "/api/admin/courses":
                 self.send_json({"ok": True, "data": db.admin_courses()})

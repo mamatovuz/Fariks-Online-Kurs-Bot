@@ -3,6 +3,10 @@ const params = new URLSearchParams(window.location.search);
 const API_BASE =
   localStorage.getItem("fariksApiBase") ||
   (window.location.protocol === "file:" ? "http://localhost:8080" : window.location.origin);
+const adminUrlToken = params.get("token") || "";
+if (adminUrlToken) {
+  localStorage.setItem("fariksAdminToken", adminUrlToken);
+}
 
 const testState = {
   slug: "",
@@ -18,10 +22,11 @@ const testState = {
 };
 
 const adminState = {
-  token: localStorage.getItem("fariksAdminToken") || "change-me",
+  token: adminUrlToken || localStorage.getItem("fariksAdminToken") || "",
   loading: true,
   message: "",
   error: "",
+  me: null,
   summary: null,
   courses: [],
   students: [],
@@ -359,6 +364,9 @@ function renderResult() {
 }
 
 async function initAdmin() {
+  if (adminUrlToken) {
+    window.history.replaceState({}, "", "/admin");
+  }
   renderAdmin();
   await loadAdminData();
 }
@@ -368,14 +376,15 @@ async function loadAdminData() {
   adminState.error = "";
   renderAdmin();
   try {
-    const [summary, courses, students, payments, results] = await Promise.all([
+    const [me, summary, courses, students, payments, results] = await Promise.all([
+      apiGet("/api/admin/me", true),
       apiGet("/api/admin/summary", true),
       apiGet("/api/admin/courses", true),
       apiGet("/api/admin/students", true),
       apiGet("/api/admin/payments", true),
       apiGet("/api/admin/results", true),
     ]);
-    Object.assign(adminState, { summary, courses, students, payments, results, loading: false });
+    Object.assign(adminState, { me, summary, courses, students, payments, results, loading: false });
   } catch (error) {
     adminState.error = error.message;
     adminState.loading = false;
@@ -401,6 +410,34 @@ function allLessons() {
   );
 }
 
+function renderAdminAccessPanel() {
+  if (adminState.token && !adminState.error) {
+    const name = adminState.me?.name || "Admin";
+    const login = adminState.me?.login_method === "telegram" ? "Telegram orqali kirildi" : "Admin kabinet";
+    return `
+      <section class="panel pad">
+        <h2>Admin kabinet</h2>
+        <p class="muted">${escapeHtml(login)}</p>
+        <div class="metric"><span>Admin</span><strong>${escapeHtml(name)}</strong></div>
+        <button class="btn secondary" id="logoutAdmin">Chiqish</button>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="panel pad">
+      <h2>Admin kirish</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label>Admin token</label>
+          <input id="adminToken" value="${escapeHtml(adminState.token)}" />
+        </div>
+        <button class="btn" id="saveAdminToken">Saqlash</button>
+      </div>
+    </section>
+  `;
+}
+
 function renderAdmin() {
   const summary = adminState.summary || {};
   const modules = allModules();
@@ -408,16 +445,7 @@ function renderAdmin() {
   renderShell(`
     <div class="admin-grid">
       <aside class="admin-stack">
-        <section class="panel pad">
-          <h2>Admin kirish</h2>
-          <div class="form-grid">
-            <div class="field">
-              <label>Admin token</label>
-              <input id="adminToken" value="${escapeHtml(adminState.token)}" />
-            </div>
-            <button class="btn" id="saveAdminToken">Saqlash</button>
-          </div>
-        </section>
+        ${renderAdminAccessPanel()}
 
         <section class="panel pad">
           <h2>Kurs yaratish</h2>
@@ -648,13 +676,28 @@ function renderResultsTable() {
 }
 
 function bindAdminEvents() {
+  const logoutAdmin = document.getElementById("logoutAdmin");
+  if (logoutAdmin) {
+    logoutAdmin.addEventListener("click", async () => {
+      localStorage.removeItem("fariksAdminToken");
+      adminState.token = "";
+      adminState.me = null;
+      adminState.message = "";
+      adminState.error = "";
+      renderAdmin();
+    });
+  }
+
   const saveToken = document.getElementById("saveAdminToken");
   if (saveToken) {
     saveToken.addEventListener("click", async () => {
       adminState.token = document.getElementById("adminToken").value.trim();
       localStorage.setItem("fariksAdminToken", adminState.token);
-      adminState.message = "Admin token saqlandi.";
       await loadAdminData();
+      if (!adminState.error) {
+        adminState.message = "Admin token saqlandi.";
+        renderAdmin();
+      }
     });
   }
 

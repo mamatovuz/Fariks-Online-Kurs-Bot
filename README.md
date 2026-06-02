@@ -43,7 +43,8 @@ Railway Variables bo'limiga quyidagilarni qo'shing:
 ```text
 BOT_TOKEN=Telegram BotFather tokeni
 PUBLIC_CLIENT_URL=https://farikstest.up.railway.app
-ADMIN_TOKEN=7903688837
+ADMIN_TELEGRAM_ID=7903688837
+ADMIN_TOKEN=mustahkam-admin-parol
 DB_PATH=/data/fariks_lms.sqlite3
 ```
 
@@ -77,5 +78,9 @@ Admin panel orqali boshlang'ich MVP rejimida quyidagilar bor:
 - Dars qo'shish.
 - Test savoli qo'shish.
 - O'quvchilar, to'lovlar va natijalarni ko'rish.
+
+Telegramda admin `/admin` deb yozsa, `ADMIN_TELEGRAM_ID` mos kelsa bot
+admin panel uchun maxsus link yuboradi. Link orqali panel token so'ramasdan
+ochiladi.
 
 Real to'lov integratsiyalari uchun Click, Payme, Uzum webhooklarini keyingi bosqichda shu API tuzilmasiga ulash mumkin.
