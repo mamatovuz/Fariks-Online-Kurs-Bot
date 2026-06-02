@@ -92,6 +92,7 @@ API_HOST = normalize_api_host(clean_env("API_HOST", "0.0.0.0"))
 API_PORT = int(clean_env("PORT") or clean_env("API_PORT") or "8080")
 DEFAULT_PUBLIC_CLIENT_URL = f"https://{RAILWAY_PUBLIC_DOMAIN}" if RAILWAY_PUBLIC_DOMAIN else f"http://localhost:{API_PORT}"
 PUBLIC_CLIENT_URL = normalize_public_url(clean_env("PUBLIC_CLIENT_URL", DEFAULT_PUBLIC_CLIENT_URL))
+PUBLIC_API_URL = normalize_public_url(clean_env("PUBLIC_API_URL", DEFAULT_PUBLIC_CLIENT_URL))
 ADMIN_TOKEN = clean_env("ADMIN_TOKEN", "change-me")
 APP_SECRET = clean_env("APP_SECRET") or ADMIN_TOKEN or BOT_TOKEN or "fariks-lms-dev-secret"
 ADMIN_TELEGRAM_IDS = {
@@ -157,6 +158,20 @@ def create_admin_session_token(telegram_id: int, name: str, username: str = "") 
 def read_admin_session_token(token: str) -> dict:
     body = read_signed_token(token, "admin")
     return dict(body.get("payload") or {})
+
+
+def same_origin(left: str, right: str) -> bool:
+    left_url = urllib.parse.urlparse(left)
+    right_url = urllib.parse.urlparse(right)
+    return (left_url.scheme, left_url.netloc) == (right_url.scheme, right_url.netloc)
+
+
+def public_link(path: str, query: dict[str, str] | None = None) -> str:
+    params = dict(query or {})
+    if PUBLIC_API_URL and not same_origin(PUBLIC_CLIENT_URL, PUBLIC_API_URL):
+        params.setdefault("api", PUBLIC_API_URL)
+    encoded = urllib.parse.urlencode(params)
+    return f"{PUBLIC_CLIENT_URL}{path}" + (f"?{encoded}" if encoded else "")
 
 
 def now_iso() -> str:
@@ -858,19 +873,28 @@ class Database:
         details = []
         for question in questions:
             selected = answer_map.get(str(question["id"]), "")
+            if selected not in {"A", "B", "C", "D"}:
+                selected = ""
             is_correct = selected == question["correct_option"]
             correct_count += 1 if is_correct else 0
             details.append(
                 {
                     "id": question["id"],
+                    "position": question["position"],
+                    "text": question["text"],
+                    "options": question["options"],
                     "selected": selected,
+                    "selected_text": question["options"].get(selected, "") if selected else "",
                     "correct": question["correct_option"],
+                    "correct_text": question["options"][question["correct_option"]],
                     "is_correct": is_correct,
                     "explanation": question["explanation"],
                 }
             )
 
         total_count = len(questions)
+        unanswered_count = sum(1 for detail in details if not detail["selected"])
+        wrong_count = sum(1 for detail in details if detail["selected"] and not detail["is_correct"])
         percent = round(correct_count * 100 / total_count)
         passed = percent >= int(token_data["pass_percent"])
         timestamp = now_iso()
@@ -911,6 +935,8 @@ class Database:
             "lesson_id": lesson_id,
             "lesson_title": token_data["lesson_title"],
             "correct_count": correct_count,
+            "wrong_count": wrong_count,
+            "unanswered_count": unanswered_count,
             "total_count": total_count,
             "percent": percent,
             "passed": passed,
@@ -1361,7 +1387,7 @@ class FariksBot:
         username = str(from_user.get("username") or "").strip()
         name = " ".join(part for part in [first_name, last_name] if part).strip() or username or str(user_id)
         token = create_admin_session_token(user_id, name, username)
-        link = f"{PUBLIC_CLIENT_URL}/admin?token={urllib.parse.quote(token)}"
+        link = public_link("/admin", {"token": token})
         self.telegram.send_message(
             chat_id,
             f"Admin kabinet:\n\n{link}",
@@ -1470,7 +1496,7 @@ class FariksBot:
         except ValueError as error:
             self.telegram.send_message(chat_id, str(error))
             return
-        link = f"{PUBLIC_CLIENT_URL}/test/{lesson['slug']}?token={token}"
+        link = public_link(f"/test/{lesson['slug']}", {"token": token})
         self.telegram.send_message(chat_id, f"🔗 Testni boshlash:\n\n{link}")
 
     def show_profile(self, chat_id: int, user_id: int) -> None:

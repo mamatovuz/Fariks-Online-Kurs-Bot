@@ -1,6 +1,12 @@
 const app = document.getElementById("app");
 const params = new URLSearchParams(window.location.search);
+const apiUrlParam = (params.get("api") || "").replace(/\/+$/, "");
+if (apiUrlParam) {
+  localStorage.setItem("fariksApiBase", apiUrlParam);
+}
 const API_BASE =
+  (window.FARIKS_API_BASE || "").replace(/\/+$/, "") ||
+  apiUrlParam ||
   localStorage.getItem("fariksApiBase") ||
   (window.location.protocol === "file:" ? "http://localhost:8080" : window.location.origin);
 const adminUrlToken = params.get("token") || "";
@@ -58,9 +64,7 @@ function typeset() {
 async function apiGet(path, admin = false) {
   const headers = admin ? { "X-Admin-Token": adminState.token } : {};
   const response = await fetch(`${API_BASE}${path}`, { headers });
-  const payload = await response.json();
-  if (!payload.ok) throw new Error(payload.error || "So'rov bajarilmadi");
-  return payload.data;
+  return parseApiResponse(response);
 }
 
 async function apiPost(path, body, admin = false) {
@@ -71,8 +75,20 @@ async function apiPost(path, body, admin = false) {
     headers,
     body: JSON.stringify(body),
   });
-  const payload = await response.json();
-  if (!payload.ok) throw new Error(payload.error || "So'rov bajarilmadi");
+  return parseApiResponse(response);
+}
+
+async function parseApiResponse(response) {
+  const text = await response.text();
+  let payload = null;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    throw new Error(`API javobi noto'g'ri (${response.status}). Backend domenini tekshiring.`);
+  }
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || `So'rov bajarilmadi (${response.status})`);
+  }
   return payload.data;
 }
 
@@ -356,15 +372,60 @@ function renderResult() {
       </div>
       <div class="meta-row">
         <div class="metric"><span>To'g'ri javob</span><strong>${result.correct_count}/${result.total_count}</strong></div>
+        <div class="metric"><span>Noto'g'ri</span><strong>${result.wrong_count}</strong></div>
+        <div class="metric"><span>Javobsiz</span><strong>${result.unanswered_count}</strong></div>
+      </div>
+      <div class="meta-row">
         <div class="metric"><span>Natija</span><strong>${result.percent}%</strong></div>
         <div class="metric"><span>Kerakli bal</span><strong>${result.pass_percent}%</strong></div>
+        <div class="metric"><span>Holat</span><strong>${passed ? "O'tdi" : "O'tmadi"}</strong></div>
       </div>
+      ${renderResultDetails(result)}
     </section>
   `);
+  typeset();
+}
+
+function renderResultDetails(result) {
+  if (!result.details?.length) return "";
+  return `
+    <div class="review-list">
+      <h2>Javoblar tahlili</h2>
+      ${result.details.map(renderResultItem).join("")}
+    </div>
+  `;
+}
+
+function renderResultItem(detail) {
+  const statusClass = detail.is_correct ? "correct" : "wrong";
+  const selectedLabel = detail.selected
+    ? `${detail.selected}) ${detail.selected_text}`
+    : "Javob berilmagan";
+  const correctLabel = `${detail.correct}) ${detail.correct_text}`;
+  return `
+    <article class="review-item ${statusClass}">
+      <div class="review-head">
+        <span class="answer-badge ${statusClass}">${detail.is_correct ? "To'g'ri" : "Noto'g'ri"}</span>
+        <strong>${detail.position}-savol</strong>
+      </div>
+      <div class="review-question">${escapeHtml(detail.text)}</div>
+      <div class="answer-pair">
+        <div>
+          <span>Sizning javobingiz</span>
+          <strong>${escapeHtml(selectedLabel)}</strong>
+        </div>
+        <div>
+          <span>To'g'ri javob</span>
+          <strong>${escapeHtml(correctLabel)}</strong>
+        </div>
+      </div>
+      ${detail.explanation ? `<p class="explanation">${escapeHtml(detail.explanation)}</p>` : ""}
+    </article>
+  `;
 }
 
 async function initAdmin() {
-  if (adminUrlToken) {
+  if (adminUrlToken || apiUrlParam) {
     window.history.replaceState({}, "", "/admin");
   }
   renderAdmin();
