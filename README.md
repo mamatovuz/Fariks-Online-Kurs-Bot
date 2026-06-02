@@ -2,13 +2,13 @@
 
 Bu workspace ichida ikki asosiy qism bor:
 
-- `bot/` - Telegram bot, SQLite baza, test API va admin endpointlar.
+- `bot/` - Telegram bot, MongoDB baza, test API va admin endpointlar.
 - `client/` - test sahifasi va oddiy admin panel interfeysi.
 
 ## Ishga tushirish
 
 1. `bot/.env.example` faylini `bot/.env` qilib nusxalang.
-2. `BOT_TOKEN` qiymatini Telegram BotFather tokeni bilan to'ldiring.
+2. `BOT_TOKEN` va `MONGODB_URI` qiymatlarini to'ldiring.
 3. Terminalda ishga tushiring:
 
 ```powershell
@@ -43,18 +43,26 @@ Railway Variables bo'limiga quyidagilarni qo'shing:
 ```text
 BOT_TOKEN=Telegram BotFather tokeni
 PUBLIC_CLIENT_URL=https://farikstest.up.railway.app
+PUBLIC_API_URL=https://farikstest.up.railway.app
 ADMIN_TELEGRAM_ID=7903688837
 ADMIN_TOKEN=mustahkam-admin-parol
-DB_PATH=/data/fariks_lms.sqlite3
+APP_SECRET=uzun-maxfiy-random-string
+MONGODB_URI=mongodb+srv://user:password@cluster.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DB=fariks_lms
 ```
 
-SQLite ma'lumotlari saqlanishi uchun Railway servisga Volume qo'shing va uni
-`/data` ga mount qiling. Public Networking yoqilgandan keyin Railway domeni
-test linklarda avtomatik ishlatiladi. Agar custom domen ishlatsangiz:
+`DB_PATH` va Railway Volume endi kerak emas. Ma'lumotlar MongoDB kolleksiyalarida
+saqlanadi. Public Networking yoqilgandan keyin Railway domeni test linklarda
+ishlatiladi. Agar frontend va backend alohida servis bo'lsa:
 
 ```text
-PUBLIC_CLIENT_URL=https://sizning-domeningiz.uz
+PUBLIC_CLIENT_URL=https://frontend-domeningiz
+PUBLIC_API_URL=https://backend-domeningiz
 ```
+
+MongoDB kolleksiyalar: `users`, `courses`, `modules`, `lessons`, `questions`,
+`payments`, `enrollments`, `progress`, `results`, `test_tokens`, `user_states`,
+`counters`.
 
 ## Bot oqimi
 

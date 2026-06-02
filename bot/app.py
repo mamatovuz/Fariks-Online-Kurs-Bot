@@ -1180,6 +1180,773 @@ class Database:
         return dict(row)
 
 
+class MongoDatabase:
+    def __init__(self, _path: Path | None = None):
+        try:
+            from pymongo import ASCENDING, MongoClient, ReturnDocument
+        except ImportError as error:
+            raise RuntimeError("MongoDB uchun `pymongo[srv]` dependency o'rnatilishi kerak.") from error
+
+        self.return_after = ReturnDocument.AFTER
+        database_url = clean_env("DATABASE_URL")
+        self.uri = (
+            clean_env("MONGODB_URI")
+            or clean_env("MONGO_URI")
+            or clean_env("MONGO_URL")
+            or (database_url if database_url.startswith("mongodb") else "")
+            or "mongodb://localhost:27017"
+        )
+        self.db_name = clean_env("MONGODB_DB", "fariks_lms")
+        self.client = MongoClient(self.uri, serverSelectionTimeoutMS=8000)
+        self.client.admin.command("ping")
+        self.db = self.client[self.db_name]
+
+        self.users = self.db.users
+        self.user_states = self.db.user_states
+        self.courses = self.db.courses
+        self.modules = self.db.modules
+        self.lessons = self.db.lessons
+        self.questions = self.db.questions
+        self.payments = self.db.payments
+        self.enrollments = self.db.enrollments
+        self.progress = self.db.progress
+        self.test_tokens = self.db.test_tokens
+        self.results = self.db.results
+        self.counters = self.db.counters
+        self.ASCENDING = ASCENDING
+
+    def _clean(self, doc: dict | None) -> dict | None:
+        if not doc:
+            return None
+        item = dict(doc)
+        item.pop("_id", None)
+        return item
+
+    def _clean_list(self, docs) -> list[dict]:
+        return [self._clean(doc) for doc in docs]
+
+    def _next_id(self, name: str) -> int:
+        row = self.counters.find_one_and_update(
+            {"_id": name},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=self.return_after,
+        )
+        return int(row["seq"])
+
+    def _sync_counter(self, name: str, collection) -> None:
+        row = collection.find_one(sort=[("id", -1)])
+        max_id = int(row["id"]) if row else 0
+        self.counters.update_one({"_id": name}, {"$max": {"seq": max_id}}, upsert=True)
+
+    def _unique_slug(self, collection, title: str) -> str:
+        base_slug = slugify(title)
+        candidate = base_slug
+        counter = 2
+        while collection.find_one({"slug": candidate}):
+            candidate = f"{base_slug}-{counter}"
+            counter += 1
+        return candidate
+
+    def init_schema(self) -> None:
+        self.users.create_index([("telegram_id", self.ASCENDING)], unique=True)
+        self.user_states.create_index([("telegram_id", self.ASCENDING)], unique=True)
+        self.courses.create_index([("id", self.ASCENDING)], unique=True)
+        self.courses.create_index([("slug", self.ASCENDING)], unique=True)
+        self.modules.create_index([("id", self.ASCENDING)], unique=True)
+        self.modules.create_index([("course_id", self.ASCENDING), ("position", self.ASCENDING)])
+        self.lessons.create_index([("id", self.ASCENDING)], unique=True)
+        self.lessons.create_index([("slug", self.ASCENDING)], unique=True)
+        self.lessons.create_index([("module_id", self.ASCENDING), ("position", self.ASCENDING)])
+        self.questions.create_index([("id", self.ASCENDING)], unique=True)
+        self.questions.create_index([("lesson_id", self.ASCENDING), ("position", self.ASCENDING)])
+        self.payments.create_index([("id", self.ASCENDING)], unique=True)
+        self.payments.create_index([("user_id", self.ASCENDING), ("created_at", self.ASCENDING)])
+        self.enrollments.create_index([("user_id", self.ASCENDING), ("course_id", self.ASCENDING)], unique=True)
+        self.progress.create_index([("user_id", self.ASCENDING), ("lesson_id", self.ASCENDING)], unique=True)
+        self.test_tokens.create_index([("token", self.ASCENDING)], unique=True)
+        self.results.create_index([("id", self.ASCENDING)], unique=True)
+        self.results.create_index([("user_id", self.ASCENDING), ("created_at", self.ASCENDING)])
+        for name, collection in [
+            ("courses", self.courses),
+            ("modules", self.modules),
+            ("lessons", self.lessons),
+            ("questions", self.questions),
+            ("payments", self.payments),
+            ("results", self.results),
+        ]:
+            self._sync_counter(name, collection)
+
+    def seed(self) -> None:
+        if self.courses.count_documents({}):
+            return
+
+        def add_course(title: str, price: int, description: str) -> int:
+            course_id = self._next_id("courses")
+            self.courses.insert_one(
+                {
+                    "_id": course_id,
+                    "id": course_id,
+                    "slug": self._unique_slug(self.courses, title),
+                    "title": title,
+                    "price": price,
+                    "description": description,
+                    "created_at": now_iso(),
+                }
+            )
+            return course_id
+
+        def add_module(course_id: int, title: str, position: int) -> int:
+            module_id = self._next_id("modules")
+            self.modules.insert_one(
+                {
+                    "_id": module_id,
+                    "id": module_id,
+                    "course_id": course_id,
+                    "title": title,
+                    "position": position,
+                    "created_at": now_iso(),
+                }
+            )
+            return module_id
+
+        def add_lesson(module_id: int, title: str, position: int, video_url: str = "") -> int:
+            lesson_id = self._next_id("lessons")
+            self.lessons.insert_one(
+                {
+                    "_id": lesson_id,
+                    "id": lesson_id,
+                    "module_id": module_id,
+                    "slug": self._unique_slug(self.lessons, title),
+                    "title": title,
+                    "position": position,
+                    "video_url": video_url,
+                    "duration_minutes": 30,
+                    "pass_percent": 80,
+                    "created_at": now_iso(),
+                }
+            )
+            return lesson_id
+
+        def add_questions(lesson_id: int, questions: list[tuple[str, str, str, str, str, str, str]]) -> None:
+            docs = []
+            for index, question in enumerate(questions, start=1):
+                question_id = self._next_id("questions")
+                text, option_a, option_b, option_c, option_d, correct_option, explanation = question
+                docs.append(
+                    {
+                        "_id": question_id,
+                        "id": question_id,
+                        "lesson_id": lesson_id,
+                        "text": text,
+                        "option_a": option_a,
+                        "option_b": option_b,
+                        "option_c": option_c,
+                        "option_d": option_d,
+                        "correct_option": correct_option,
+                        "explanation": explanation,
+                        "position": index,
+                        "created_at": now_iso(),
+                    }
+                )
+            if docs:
+                self.questions.insert_many(docs)
+
+        national = add_course(
+            "Milliy Sertifikat Matematika",
+            300_000,
+            "Milliy sertifikat imtihonlari uchun bosqichma-bosqich matematika kursi.",
+        )
+        attestation = add_course(
+            "Attestatsiya Matematika",
+            250_000,
+            "Ustozlar attestatsiyasi uchun amaliy misollar va testlar.",
+        )
+        applicant = add_course(
+            "Abituriyent Matematika",
+            350_000,
+            "DTM va oliy ta'lim kirish imtihonlari uchun matematika tayyorlov kursi.",
+        )
+
+        module_1 = add_module(national, "1-MODUL: Algebra asoslari", 1)
+        module_2 = add_module(national, "2-MODUL: Trigonometriya", 2)
+        module_3 = add_module(national, "3-MODUL: Geometriya", 3)
+
+        lesson_1 = add_lesson(module_1, "1-Dars: Chiziqli tenglamalar", 1)
+        lesson_2 = add_lesson(module_1, "2-Dars: Ildizli tenglamalar", 2)
+        lesson_3 = add_lesson(module_1, "3-Dars: Logarifmlar", 3)
+        add_lesson(module_2, "4-Dars: Trigonometrik ayniyatlar", 1)
+        add_lesson(module_2, "5-Dars: Sinus va kosinus tenglamalar", 2)
+        add_lesson(module_3, "6-Dars: Uchburchaklar", 1)
+
+        add_questions(
+            lesson_1,
+            [
+                (r"$2x+3=11$ tenglamani yeching.", r"$4$", r"$5$", r"$3$", r"$7$", "A", r"$2x=8$, demak $x=4$."),
+                (r"$\frac{2x+3}{x-1}=5$ tenglamani yeching.", r"$2$", r"$3$", r"$\frac{8}{3}$", r"$-1$", "C", r"$2x+3=5x-5$, demak $x=\frac{8}{3}$."),
+                (r"$3(x-2)=2x+5$ bo'lsa, $x$ nechaga teng?", r"$9$", r"$11$", r"$7$", r"$13$", "B", r"$3x-6=2x+5$, demak $x=11$."),
+                (r"$5x-7=2x+14$ tenglama ildizini toping.", r"$7$", r"$5$", r"$6$", r"$9$", "A", r"$3x=21$, demak $x=7$."),
+                (r"$4-2x=10$ tenglamaning yechimi qaysi?", r"$3$", r"$-2$", r"$-3$", r"$7$", "C", r"$-2x=6$, demak $x=-3$."),
+                (r"$\frac{x+4}{3}=5$ tenglamada $x$ ni toping.", r"$10$", r"$11$", r"$12$", r"$9$", "B", r"$x+4=15$, demak $x=11$."),
+                (r"$7x+1=3x+17$ bo'lsa, $x$ nechaga teng?", r"$2$", r"$3$", r"$4$", r"$5$", "C", r"$4x=16$, demak $x=4$."),
+                (r"$2(x+5)-3=15$ tenglamani yeching.", r"$4$", r"$6$", r"$8$", r"$9$", "A", r"$2x+7=15$, demak $x=4$."),
+                (r"$\frac{x}{2}+\frac{x}{3}=10$ tenglama ildizini toping.", r"$10$", r"$12$", r"$14$", r"$16$", "B", r"$\frac{5x}{6}=10$, demak $x=12$."),
+                (r"$0.2x+3=7$ bo'lsa, $x$ nechaga teng?", r"$10$", r"$15$", r"$20$", r"$25$", "C", r"$0.2x=4$, demak $x=20$."),
+                (r"$|x-3|=5$ tenglama yechimlari qaysi?", r"$8$ va $-2$", r"$5$ va $-5$", r"$3$ va $5$", r"$2$ va $8$", "A", r"$x-3=5$ yoki $x-3=-5$."),
+                (r"$6-(x+1)=2x-4$ tenglamani yeching.", r"$2$", r"$3$", r"$4$", r"$5$", "B", r"$5-x=2x-4$, demak $3x=9$."),
+                (r"$\frac{2}{3}x-4=6$ bo'lsa, $x$ nechaga teng?", r"$12$", r"$15$", r"$18$", r"$21$", "B", r"$\frac{2}{3}x=10$, demak $x=15$."),
+                (r"$5(x-1)=2(2x+3)$ tenglama ildizini toping.", r"$9$", r"$10$", r"$11$", r"$12$", "C", r"$5x-5=4x+6$, demak $x=11$."),
+                (r"$\frac{3x-1}{2}=7$ bo'lsa, $x$ nechaga teng?", r"$4$", r"$5$", r"$6$", r"$7$", "B", r"$3x-1=14$, demak $x=5$."),
+                (r"$9x=3(x+8)$ tenglamani yeching.", r"$3$", r"$4$", r"$5$", r"$6$", "B", r"$9x=3x+24$, demak $x=4$."),
+                (r"$x-(2x-5)=1$ tenglama yechimi qaysi?", r"$2$", r"$3$", r"$4$", r"$5$", "C", r"$-x+5=1$, demak $x=4$."),
+                (r"$4(x+2)=2x+18$ tenglamani yeching.", r"$4$", r"$5$", r"$6$", r"$7$", "B", r"$4x+8=2x+18$, demak $x=5$."),
+                (r"$\frac{x-2}{x+1}=\frac{1}{2}$ tenglama ildizini toping.", r"$3$", r"$4$", r"$5$", r"$6$", "C", r"$2x-4=x+1$, demak $x=5$."),
+                (r"$3x+2=2(x+9)$ bo'lsa, $x$ nechaga teng?", r"$14$", r"$15$", r"$16$", r"$18$", "C", r"$3x+2=2x+18$, demak $x=16$."),
+            ],
+        )
+
+        short_questions = [
+            (r"$\sqrt{x+4}=5$ tenglamani yeching.", r"$19$", r"$20$", r"$21$", r"$22$", "C", r"$x+4=25$, demak $x=21$."),
+            (r"$\sqrt{x-1}=4$ bo'lsa, $x$ nechaga teng?", r"$15$", r"$16$", r"$17$", r"$18$", "C", r"$x-1=16$, demak $x=17$."),
+            (r"$\sqrt{x+4}+\sqrt{x-1}=5$ uchun mos yechimni toping.", r"$1$", r"$5$", r"$10$", r"$13$", "B", r"$x=5$ bo'lsa, $3+2=5$."),
+            (r"$\sqrt{2x+1}=3$ tenglama ildizi qaysi?", r"$3$", r"$4$", r"$5$", r"$6$", "B", r"$2x+1=9$, demak $x=4$."),
+            (r"$\sqrt{x}=7$ bo'lsa, $x$ nechaga teng?", r"$14$", r"$21$", r"$42$", r"$49$", "D", r"$x=49$."),
+        ]
+        add_questions(lesson_2, short_questions)
+        add_questions(
+            lesson_3,
+            [
+                (r"$\log_2 x=5$ bo'lsa, $x$ nechaga teng?", r"$10$", r"$16$", r"$25$", r"$32$", "D", r"$x=2^5=32$."),
+                (r"$\log_3 81$ qiymatini toping.", r"$3$", r"$4$", r"$5$", r"$6$", "B", r"$3^4=81$."),
+                (r"$\log_{10} 1000$ qiymati qaysi?", r"$2$", r"$3$", r"$4$", r"$10$", "B", r"$10^3=1000$."),
+                (r"$\log_5 25+\log_2 8$ ni hisoblang.", r"$4$", r"$5$", r"$6$", r"$7$", "B", r"$2+3=5$."),
+                (r"$\log_4 16$ qiymatini toping.", r"$2$", r"$3$", r"$4$", r"$8$", "A", r"$4^2=16$."),
+            ],
+        )
+
+        for course_id, label in [(attestation, "Attestatsiya"), (applicant, "Abituriyent")]:
+            module = add_module(course_id, "1-MODUL: Boshlang'ich testlar", 1)
+            lesson = add_lesson(module, f"1-Dars: {label} kirish testi", 1)
+            add_questions(lesson, short_questions)
+
+    def set_state(self, telegram_id: int, state: str, payload: dict | None = None) -> None:
+        self.user_states.update_one(
+            {"_id": telegram_id},
+            {"$set": {"telegram_id": telegram_id, "state": state, "payload": payload or {}, "updated_at": now_iso()}},
+            upsert=True,
+        )
+
+    def get_state(self, telegram_id: int) -> tuple[str | None, dict]:
+        row = self.user_states.find_one({"_id": telegram_id})
+        if not row:
+            return None, {}
+        payload = row.get("payload") or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload or "{}")
+        return row.get("state"), payload
+
+    def clear_state(self, telegram_id: int) -> None:
+        self.user_states.delete_one({"_id": telegram_id})
+
+    def register_user(self, telegram_id: int, full_name: str, phone: str) -> None:
+        self.users.update_one(
+            {"_id": telegram_id},
+            {
+                "$set": {"telegram_id": telegram_id, "full_name": full_name, "phone": phone},
+                "$setOnInsert": {"registered_at": now_iso()},
+            },
+            upsert=True,
+        )
+        self.clear_state(telegram_id)
+
+    def get_user(self, telegram_id: int) -> dict | None:
+        return self._clean(self.users.find_one({"_id": telegram_id}))
+
+    def list_courses(self) -> list[dict]:
+        return self._clean_list(self.courses.find().sort("id", 1))
+
+    def get_course(self, course_id: int) -> dict | None:
+        return self._clean(self.courses.find_one({"id": int(course_id)}))
+
+    def list_enrollments(self, user_id: int) -> list[dict]:
+        items = self._clean_list(self.enrollments.find({"user_id": user_id, "status": "active"}).sort("created_at", -1))
+        for item in items:
+            course = self.get_course(item["course_id"]) or {}
+            item.update({"title": course.get("title", ""), "price": course.get("price", 0), "description": course.get("description", "")})
+        return items
+
+    def is_enrolled(self, user_id: int, course_id: int) -> bool:
+        return bool(self.enrollments.find_one({"user_id": user_id, "course_id": course_id, "status": "active"}))
+
+    def create_payment_and_enrollment(self, user_id: int, course_id: int, method: str) -> dict:
+        course = self.get_course(course_id)
+        if not course:
+            raise ValueError("Kurs topilmadi")
+        payment_id = self._next_id("payments")
+        self.payments.insert_one(
+            {
+                "_id": payment_id,
+                "id": payment_id,
+                "user_id": user_id,
+                "course_id": course_id,
+                "method": method,
+                "amount": course["price"],
+                "status": "confirmed",
+                "created_at": now_iso(),
+            }
+        )
+        self.enrollments.update_one(
+            {"_id": f"{user_id}:{course_id}"},
+            {"$set": {"user_id": user_id, "course_id": course_id, "status": "active"}, "$setOnInsert": {"created_at": now_iso()}},
+            upsert=True,
+        )
+        return {"payment_id": payment_id, "course": course}
+
+    def list_payments(self, user_id: int) -> list[dict]:
+        items = self._clean_list(self.payments.find({"user_id": user_id}).sort("created_at", -1))
+        for item in items:
+            course = self.get_course(item["course_id"]) or {}
+            item["course_title"] = course.get("title", "")
+        return items
+
+    def get_module(self, module_id: int) -> dict | None:
+        return self._clean(self.modules.find_one({"id": int(module_id)}))
+
+    def list_module_lessons(self, module_id: int) -> list[dict]:
+        return self._clean_list(self.lessons.find({"module_id": int(module_id)}).sort([("position", 1), ("id", 1)]))
+
+    def get_lesson(self, lesson_id: int) -> dict | None:
+        lesson = self._clean(self.lessons.find_one({"id": int(lesson_id)}))
+        if not lesson:
+            return None
+        module = self.get_module(lesson["module_id"]) or {}
+        course = self.get_course(module.get("course_id", 0)) or {}
+        lesson["course_id"] = module.get("course_id")
+        lesson["module_title"] = module.get("title", "")
+        lesson["course_title"] = course.get("title", "")
+        return lesson
+
+    def get_lesson_by_slug(self, slug: str) -> dict | None:
+        lesson = self._clean(self.lessons.find_one({"slug": slug}))
+        return self.get_lesson(lesson["id"]) if lesson else None
+
+    def course_lesson_order(self, course_id: int) -> list[dict]:
+        modules = self._clean_list(self.modules.find({"course_id": int(course_id)}).sort([("position", 1), ("id", 1)]))
+        ordered = []
+        for module in modules:
+            lessons = self._clean_list(self.lessons.find({"module_id": module["id"]}).sort([("position", 1), ("id", 1)]))
+            for lesson in lessons:
+                lesson["course_id"] = course_id
+                lesson["module_title"] = module["title"]
+                lesson["module_position"] = module["position"]
+                ordered.append(lesson)
+        return ordered
+
+    def profile_lesson_progress(self, user_id: int, lesson_id: int) -> dict | None:
+        return self._clean(self.progress.find_one({"_id": f"{user_id}:{lesson_id}"}))
+
+    def is_lesson_unlocked(self, user_id: int, lesson_id: int) -> bool:
+        lesson = self.get_lesson(lesson_id)
+        if not lesson or not self.is_enrolled(user_id, lesson["course_id"]):
+            return False
+        ordered = self.course_lesson_order(lesson["course_id"])
+        lesson_ids = [item["id"] for item in ordered]
+        if lesson_id not in lesson_ids:
+            return False
+        index = lesson_ids.index(lesson_id)
+        if index == 0:
+            return True
+        previous_id = lesson_ids[index - 1]
+        previous = self.profile_lesson_progress(user_id, previous_id)
+        return bool(previous and previous.get("status") == "passed")
+
+    def get_course_structure(self, user_id: int, course_id: int) -> dict:
+        course = self.get_course(course_id)
+        if not course:
+            raise ValueError("Kurs topilmadi")
+        modules = self._clean_list(self.modules.find({"course_id": course_id}).sort([("position", 1), ("id", 1)]))
+        progress_rows = self._clean_list(self.progress.find({"user_id": user_id}))
+        progress_map = {row["lesson_id"]: row for row in progress_rows}
+        for module in modules:
+            lessons = self.list_module_lessons(module["id"])
+            for lesson in lessons:
+                lesson["unlocked"] = self.is_lesson_unlocked(user_id, lesson["id"])
+                lesson["progress"] = progress_map.get(lesson["id"])
+            module["lessons"] = lessons
+            module["unlocked"] = any(lesson["unlocked"] for lesson in lessons)
+        return {"course": course, "modules": modules}
+
+    def get_questions(self, lesson_id: int, include_correct: bool = False) -> list[dict]:
+        rows = self._clean_list(self.questions.find({"lesson_id": int(lesson_id)}).sort([("position", 1), ("id", 1)]))
+        questions = []
+        for row in rows:
+            item = {
+                "id": row["id"],
+                "text": row["text"],
+                "position": row["position"],
+                "options": {"A": row["option_a"], "B": row["option_b"], "C": row["option_c"], "D": row["option_d"]},
+            }
+            if include_correct:
+                item["correct_option"] = row["correct_option"]
+                item["explanation"] = row.get("explanation", "")
+            questions.append(item)
+        return questions
+
+    def create_test_token(self, user_id: int, lesson_id: int) -> str:
+        if not self.is_lesson_unlocked(user_id, lesson_id):
+            raise ValueError("Bu dars hali ochilmagan")
+        user = self.get_user(user_id) or {"full_name": "", "phone": ""}
+        expires_at_dt = datetime.now(timezone.utc) + timedelta(hours=2)
+        token = create_signed_token(
+            "test",
+            {"user_id": user_id, "lesson_id": lesson_id, "full_name": user.get("full_name", ""), "phone": user.get("phone", "")},
+            expires_at_dt,
+        )
+        self.test_tokens.update_one(
+            {"_id": token},
+            {"$set": {"token": token, "user_id": user_id, "lesson_id": lesson_id, "expires_at": expires_at_dt.isoformat(), "created_at": now_iso()}},
+            upsert=True,
+        )
+        return token
+
+    def validate_token(self, token: str, lesson_slug: str | None = None) -> dict:
+        row = self._clean(self.test_tokens.find_one({"_id": token}))
+        if row:
+            lesson = self.get_lesson(row["lesson_id"])
+            user = self.get_user(row["user_id"])
+        else:
+            body = read_signed_token(token, "test")
+            claims = dict(body.get("payload") or {})
+            user_id = int(claims.get("user_id") or 0)
+            lesson_id = int(claims.get("lesson_id") or 0)
+            lesson = self.get_lesson(lesson_id)
+            if not user_id or not lesson:
+                raise ValueError("Test token topilmadi")
+            full_name = str(claims.get("full_name") or "Telegram foydalanuvchi").strip()
+            phone = str(claims.get("phone") or "-").strip()
+            user = self.get_user(user_id)
+            if not user:
+                self.register_user(user_id, full_name, phone)
+                user = self.get_user(user_id)
+            self.enrollments.update_one(
+                {"_id": f"{user_id}:{lesson['course_id']}"},
+                {"$set": {"user_id": user_id, "course_id": lesson["course_id"], "status": "active"}, "$setOnInsert": {"created_at": now_iso()}},
+                upsert=True,
+            )
+            row = {
+                "token": token,
+                "user_id": user_id,
+                "lesson_id": lesson_id,
+                "expires_at": datetime.fromtimestamp(int(body["exp"]), timezone.utc).isoformat(),
+                "created_at": now_iso(),
+            }
+
+        if not lesson:
+            raise ValueError("Test token topilmadi")
+        expires_at = datetime.fromisoformat(row["expires_at"])
+        if expires_at < datetime.now(timezone.utc):
+            raise ValueError("Test link muddati tugagan")
+        if lesson_slug and lesson["slug"] != lesson_slug:
+            raise ValueError("Test link boshqa dars uchun berilgan")
+        if not self.is_lesson_unlocked(row["user_id"], row["lesson_id"]):
+            raise ValueError("Bu dars hali ochilmagan")
+        user = user or {"full_name": "Telegram foydalanuvchi", "phone": "-"}
+        return {
+            **row,
+            "slug": lesson["slug"],
+            "lesson_title": lesson["title"],
+            "duration_minutes": lesson["duration_minutes"],
+            "pass_percent": lesson["pass_percent"],
+            "module_title": lesson["module_title"],
+            "course_title": lesson["course_title"],
+            "course_id": lesson["course_id"],
+            "full_name": user.get("full_name", ""),
+            "phone": user.get("phone", ""),
+        }
+
+    def get_test_payload(self, token: str, lesson_slug: str) -> dict:
+        token_data = self.validate_token(token, lesson_slug)
+        questions = self.get_questions(token_data["lesson_id"], include_correct=False)
+        return {
+            "user": {"telegram_id": token_data["user_id"], "full_name": token_data["full_name"], "phone": token_data["phone"]},
+            "course": {"id": token_data["course_id"], "title": token_data["course_title"]},
+            "module": {"title": token_data["module_title"]},
+            "lesson": {
+                "id": token_data["lesson_id"],
+                "slug": token_data["slug"],
+                "title": token_data["lesson_title"],
+                "duration_minutes": token_data["duration_minutes"],
+                "pass_percent": token_data["pass_percent"],
+            },
+            "questions": questions,
+        }
+
+    def grade_result(self, token: str, answers: dict[str, str]) -> dict:
+        token_data = self.validate_token(token)
+        lesson_id = int(token_data["lesson_id"])
+        user_id = int(token_data["user_id"])
+        questions = self.get_questions(lesson_id, include_correct=True)
+        if not questions:
+            raise ValueError("Bu dars uchun savollar topilmadi")
+        answer_map = {str(key): str(value).upper() for key, value in answers.items()}
+        correct_count = 0
+        details = []
+        for question in questions:
+            selected = answer_map.get(str(question["id"]), "")
+            if selected not in {"A", "B", "C", "D"}:
+                selected = ""
+            is_correct = selected == question["correct_option"]
+            correct_count += 1 if is_correct else 0
+            details.append(
+                {
+                    "id": question["id"],
+                    "position": question["position"],
+                    "text": question["text"],
+                    "options": question["options"],
+                    "selected": selected,
+                    "selected_text": question["options"].get(selected, "") if selected else "",
+                    "correct": question["correct_option"],
+                    "correct_text": question["options"][question["correct_option"]],
+                    "is_correct": is_correct,
+                    "explanation": question["explanation"],
+                }
+            )
+        total_count = len(questions)
+        unanswered_count = sum(1 for detail in details if not detail["selected"])
+        wrong_count = sum(1 for detail in details if detail["selected"] and not detail["is_correct"])
+        percent = round(correct_count * 100 / total_count)
+        passed = percent >= int(token_data["pass_percent"])
+        timestamp = now_iso()
+        result_id = self._next_id("results")
+        self.results.insert_one(
+            {
+                "_id": result_id,
+                "id": result_id,
+                "user_id": user_id,
+                "lesson_id": lesson_id,
+                "correct_count": correct_count,
+                "total_count": total_count,
+                "percent": percent,
+                "passed": int(passed),
+                "created_at": timestamp,
+            }
+        )
+        existing = self.profile_lesson_progress(user_id, lesson_id)
+        best_percent = max(percent, existing["best_percent"] if existing else 0)
+        status = "passed" if passed or (existing and existing.get("status") == "passed") else "failed"
+        passed_at = timestamp if passed else (existing.get("passed_at") if existing else None)
+        self.progress.update_one(
+            {"_id": f"{user_id}:{lesson_id}"},
+            {
+                "$set": {
+                    "user_id": user_id,
+                    "lesson_id": lesson_id,
+                    "status": status,
+                    "best_percent": best_percent,
+                    "passed_at": passed_at,
+                    "updated_at": timestamp,
+                }
+            },
+            upsert=True,
+        )
+        next_lesson = self.next_lesson_after(lesson_id) if passed else None
+        course_completed = passed and next_lesson is None and self.is_course_completed(user_id, token_data["course_id"])
+        return {
+            "user_id": user_id,
+            "lesson_id": lesson_id,
+            "lesson_title": token_data["lesson_title"],
+            "correct_count": correct_count,
+            "wrong_count": wrong_count,
+            "unanswered_count": unanswered_count,
+            "total_count": total_count,
+            "percent": percent,
+            "passed": passed,
+            "pass_percent": token_data["pass_percent"],
+            "next_lesson": next_lesson,
+            "course_completed": course_completed,
+            "details": details,
+        }
+
+    def next_lesson_after(self, lesson_id: int) -> dict | None:
+        lesson = self.get_lesson(lesson_id)
+        if not lesson:
+            return None
+        ordered = self.course_lesson_order(lesson["course_id"])
+        ids = [item["id"] for item in ordered]
+        if lesson_id not in ids:
+            return None
+        index = ids.index(lesson_id)
+        return ordered[index + 1] if index + 1 < len(ordered) else None
+
+    def is_course_completed(self, user_id: int, course_id: int) -> bool:
+        ordered = self.course_lesson_order(course_id)
+        if not ordered:
+            return False
+        passed_ids = {row["lesson_id"] for row in self.progress.find({"user_id": user_id, "status": "passed"}, {"lesson_id": 1})}
+        return all(item["id"] in passed_ids for item in ordered)
+
+    def list_results(self, user_id: int) -> list[dict]:
+        items = self._clean_list(self.results.find({"user_id": user_id}).sort("created_at", -1).limit(20))
+        for item in items:
+            lesson = self.get_lesson(item["lesson_id"]) or {}
+            item["lesson_title"] = lesson.get("title", "")
+            item["course_title"] = lesson.get("course_title", "")
+        return items
+
+    def profile_stats(self, user_id: int) -> dict:
+        enrollments = self.enrollments.count_documents({"user_id": user_id, "status": "active"})
+        passed = self.progress.count_documents({"user_id": user_id, "status": "passed"})
+        rows = list(self.results.find({"user_id": user_id}, {"percent": 1}))
+        avg = round(sum(row.get("percent", 0) for row in rows) / len(rows)) if rows else 0
+        return {"enrollments": enrollments, "passed_lessons": passed, "average_percent": int(avg or 0)}
+
+    def admin_summary(self) -> dict:
+        return {
+            "courses": self.courses.count_documents({}),
+            "modules": self.modules.count_documents({}),
+            "lessons": self.lessons.count_documents({}),
+            "questions": self.questions.count_documents({}),
+            "students": self.users.count_documents({}),
+            "payments": self.payments.count_documents({}),
+            "results": self.results.count_documents({}),
+        }
+
+    def admin_courses(self) -> list[dict]:
+        courses = self.list_courses()
+        modules = self._clean_list(self.modules.find().sort([("position", 1), ("id", 1)]))
+        lessons = self._clean_list(self.lessons.find().sort([("position", 1), ("id", 1)]))
+        counts = {row["_id"]: row["total"] for row in self.questions.aggregate([{"$group": {"_id": "$lesson_id", "total": {"$sum": 1}}}])}
+        lessons_by_module: dict[int, list[dict]] = {}
+        for lesson in lessons:
+            lesson["question_count"] = counts.get(lesson["id"], 0)
+            lessons_by_module.setdefault(lesson["module_id"], []).append(lesson)
+        modules_by_course: dict[int, list[dict]] = {}
+        for module in modules:
+            module["lessons"] = lessons_by_module.get(module["id"], [])
+            modules_by_course.setdefault(module["course_id"], []).append(module)
+        for course in courses:
+            course["modules"] = modules_by_course.get(course["id"], [])
+        return courses
+
+    def admin_students(self) -> list[dict]:
+        students = self._clean_list(self.users.find().sort("registered_at", -1))
+        for student in students:
+            user_id = student["telegram_id"]
+            student["courses_count"] = self.enrollments.count_documents({"user_id": user_id, "status": "active"})
+            student["passed_lessons"] = self.progress.count_documents({"user_id": user_id, "status": "passed"})
+        return students
+
+    def admin_payments(self) -> list[dict]:
+        items = self._clean_list(self.payments.find().sort("created_at", -1).limit(100))
+        for item in items:
+            user = self.get_user(item["user_id"]) or {}
+            course = self.get_course(item["course_id"]) or {}
+            item["full_name"] = user.get("full_name", "")
+            item["course_title"] = course.get("title", "")
+        return items
+
+    def admin_results(self) -> list[dict]:
+        items = self._clean_list(self.results.find().sort("created_at", -1).limit(100))
+        for item in items:
+            user = self.get_user(item["user_id"]) or {}
+            lesson = self.get_lesson(item["lesson_id"]) or {}
+            item["full_name"] = user.get("full_name", "")
+            item["lesson_title"] = lesson.get("title", "")
+            item["course_title"] = lesson.get("course_title", "")
+        return items
+
+    def admin_create_course(self, data: dict) -> dict:
+        title = str(data.get("title", "")).strip()
+        price = int(data.get("price") or 0)
+        description = str(data.get("description", "")).strip()
+        if not title or price <= 0:
+            raise ValueError("Kurs nomi va narxi to'g'ri kiritilishi kerak")
+        course_id = self._next_id("courses")
+        doc = {
+            "_id": course_id,
+            "id": course_id,
+            "slug": self._unique_slug(self.courses, title),
+            "title": title,
+            "price": price,
+            "description": description,
+            "created_at": now_iso(),
+        }
+        self.courses.insert_one(doc)
+        return self.get_course(course_id)
+
+    def admin_create_module(self, data: dict) -> dict:
+        course_id = int(data.get("course_id") or 0)
+        title = str(data.get("title", "")).strip()
+        position = int(data.get("position") or 1)
+        if not course_id or not title:
+            raise ValueError("Kurs va modul nomi kiritilishi kerak")
+        module_id = self._next_id("modules")
+        self.modules.insert_one({"_id": module_id, "id": module_id, "course_id": course_id, "title": title, "position": position, "created_at": now_iso()})
+        return self.get_module(module_id)
+
+    def admin_create_lesson(self, data: dict) -> dict:
+        module_id = int(data.get("module_id") or 0)
+        title = str(data.get("title", "")).strip()
+        position = int(data.get("position") or 1)
+        duration = int(data.get("duration_minutes") or 30)
+        pass_percent = int(data.get("pass_percent") or 80)
+        video_url = str(data.get("video_url", "")).strip()
+        if not module_id or not title:
+            raise ValueError("Modul va dars nomi kiritilishi kerak")
+        lesson_id = self._next_id("lessons")
+        self.lessons.insert_one(
+            {
+                "_id": lesson_id,
+                "id": lesson_id,
+                "module_id": module_id,
+                "slug": self._unique_slug(self.lessons, title),
+                "title": title,
+                "position": position,
+                "video_url": video_url,
+                "duration_minutes": duration,
+                "pass_percent": pass_percent,
+                "created_at": now_iso(),
+            }
+        )
+        return self.get_lesson(lesson_id)
+
+    def admin_create_question(self, data: dict) -> dict:
+        lesson_id = int(data.get("lesson_id") or 0)
+        text = str(data.get("text", "")).strip()
+        correct = str(data.get("correct_option", "")).strip().upper()
+        options = data.get("options") or {}
+        option_a = str(data.get("option_a") or options.get("A") or "").strip()
+        option_b = str(data.get("option_b") or options.get("B") or "").strip()
+        option_c = str(data.get("option_c") or options.get("C") or "").strip()
+        option_d = str(data.get("option_d") or options.get("D") or "").strip()
+        explanation = str(data.get("explanation", "")).strip()
+        position = int(data.get("position") or 1)
+        if not lesson_id or not text or correct not in {"A", "B", "C", "D"}:
+            raise ValueError("Savol, dars va to'g'ri javob kiritilishi kerak")
+        if not all([option_a, option_b, option_c, option_d]):
+            raise ValueError("A, B, C, D variantlari to'liq kiritilishi kerak")
+        question_id = self._next_id("questions")
+        doc = {
+            "_id": question_id,
+            "id": question_id,
+            "lesson_id": lesson_id,
+            "text": text,
+            "option_a": option_a,
+            "option_b": option_b,
+            "option_c": option_c,
+            "option_d": option_d,
+            "correct_option": correct,
+            "explanation": explanation,
+            "position": position,
+            "created_at": now_iso(),
+        }
+        self.questions.insert_one(doc)
+        return self._clean(doc)
+
+
+Database = MongoDatabase
+
+
 class TelegramClient:
     def __init__(self, token: str):
         self.token = token
@@ -1455,14 +2222,8 @@ class FariksBot:
         self.telegram.send_message(chat_id, "\n".join(lines), {"inline_keyboard": keyboard})
 
     def show_module_lessons(self, chat_id: int, user_id: int, module_id: int) -> None:
-        with self.db.connection() as conn:
-            module = conn.execute("SELECT * FROM modules WHERE id = ?", (module_id,)).fetchone()
-            lessons = rows_to_dicts(
-                conn.execute(
-                    "SELECT * FROM lessons WHERE module_id = ? ORDER BY position, id",
-                    (module_id,),
-                ).fetchall()
-            )
+        module = self.db.get_module(module_id)
+        lessons = self.db.list_module_lessons(module_id)
         if not module:
             self.telegram.send_message(chat_id, "Modul topilmadi.")
             return
@@ -1540,18 +2301,6 @@ class FariksBot:
                 f"Natija: {result['correct_count']}/{result['total_count']} - {result['percent']}%\n"
             )
         self.telegram.send_message(chat_id, "\n".join(lines), self.main_keyboard())
-
-
-def profile_lesson_progress(self: Database, user_id: int, lesson_id: int) -> dict | None:
-    with self.connection() as conn:
-        row = conn.execute(
-            "SELECT * FROM progress WHERE user_id = ? AND lesson_id = ?",
-            (user_id, lesson_id),
-        ).fetchone()
-    return dict(row) if row else None
-
-
-setattr(Database, "profile_lesson_progress", profile_lesson_progress)
 
 
 def make_handler(db: Database, telegram: TelegramClient):

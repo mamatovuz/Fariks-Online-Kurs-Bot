@@ -1,1 +1,1 @@
-# No external Python packages are required for the MVP.
+pymongo[srv]>=4.7,<5
