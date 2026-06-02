@@ -42,7 +42,8 @@ Railway Variables bo'limiga quyidagilarni qo'shing:
 
 ```text
 BOT_TOKEN=Telegram BotFather tokeni
-ADMIN_TOKEN=mustahkam-admin-parol
+PUBLIC_CLIENT_URL=https://farikstest.up.railway.app
+ADMIN_TOKEN=7903688837
 DB_PATH=/data/fariks_lms.sqlite3
 ```
 

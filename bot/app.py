@@ -53,14 +53,45 @@ def load_env(path: Path) -> None:
 
 load_env(BASE_DIR / ".env")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
-API_HOST = os.getenv("API_HOST", "0.0.0.0").strip()
-API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT") or "8080")
+
+def clean_env(name: str, default: str = "") -> str:
+    value = os.getenv(name, default).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1].strip()
+    return value
+
+
+def normalize_api_host(value: str) -> str:
+    if value.startswith(("http://", "https://")):
+        return "0.0.0.0"
+    return value or "0.0.0.0"
+
+
+def normalize_public_url(value: str) -> str:
+    value = value.strip().rstrip("/")
+    if not value:
+        return value
+    if "://" not in value:
+        value = f"https://{value}"
+    parsed = urllib.parse.urlparse(value)
+    host = parsed.netloc.lower()
+    if host.endswith(".railway.app") and not host.endswith(".up.railway.app"):
+        subdomain = host[: -len(".railway.app")]
+        host = f"{subdomain}.up.railway.app"
+        value = urllib.parse.urlunparse(("https", host, parsed.path, "", "", ""))
+    elif parsed.scheme == "http" and host.endswith(".up.railway.app"):
+        value = urllib.parse.urlunparse(("https", parsed.netloc, parsed.path, "", "", ""))
+    return value.rstrip("/")
+
+
+BOT_TOKEN = clean_env("BOT_TOKEN")
+RAILWAY_PUBLIC_DOMAIN = clean_env("RAILWAY_PUBLIC_DOMAIN")
+API_HOST = normalize_api_host(clean_env("API_HOST", "0.0.0.0"))
+API_PORT = int(clean_env("PORT") or clean_env("API_PORT") or "8080")
 DEFAULT_PUBLIC_CLIENT_URL = f"https://{RAILWAY_PUBLIC_DOMAIN}" if RAILWAY_PUBLIC_DOMAIN else f"http://localhost:{API_PORT}"
-PUBLIC_CLIENT_URL = os.getenv("PUBLIC_CLIENT_URL", DEFAULT_PUBLIC_CLIENT_URL).rstrip("/")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
-DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "fariks_lms.sqlite3")))
+PUBLIC_CLIENT_URL = normalize_public_url(clean_env("PUBLIC_CLIENT_URL", DEFAULT_PUBLIC_CLIENT_URL))
+ADMIN_TOKEN = clean_env("ADMIN_TOKEN", "change-me")
+DB_PATH = Path(clean_env("DB_PATH", str(BASE_DIR / "fariks_lms.sqlite3")))
 if not DB_PATH.is_absolute():
     DB_PATH = BASE_DIR / DB_PATH
 
