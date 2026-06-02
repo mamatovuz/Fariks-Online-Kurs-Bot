@@ -41,9 +41,11 @@ def load_env(path: Path) -> None:
 load_env(BASE_DIR / ".env")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-API_HOST = os.getenv("API_HOST", "127.0.0.1").strip()
-API_PORT = int(os.getenv("API_PORT", "8080"))
-PUBLIC_CLIENT_URL = os.getenv("PUBLIC_CLIENT_URL", f"http://localhost:{API_PORT}").rstrip("/")
+RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+API_HOST = os.getenv("API_HOST", "0.0.0.0").strip()
+API_PORT = int(os.getenv("PORT") or os.getenv("API_PORT") or "8080")
+DEFAULT_PUBLIC_CLIENT_URL = f"https://{RAILWAY_PUBLIC_DOMAIN}" if RAILWAY_PUBLIC_DOMAIN else f"http://localhost:{API_PORT}"
+PUBLIC_CLIENT_URL = os.getenv("PUBLIC_CLIENT_URL", DEFAULT_PUBLIC_CLIENT_URL).rstrip("/")
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "fariks_lms.sqlite3")))
 if not DB_PATH.is_absolute():

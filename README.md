@@ -24,6 +24,27 @@ Server client saytni ham o'zi beradi:
 
 Admin panel tokeni `.env` ichidagi `ADMIN_TOKEN` qiymati bilan kiriladi.
 
+## Railway deploy
+
+Railway servisni GitHub repodan deploy qiling. Repo ichidagi `railway.json` serverni
+`python bot/app.py` bilan ishga tushiradi va `/api/health` orqali tekshiradi.
+
+Railway Variables bo'limiga quyidagilarni qo'shing:
+
+```text
+BOT_TOKEN=Telegram BotFather tokeni
+ADMIN_TOKEN=mustahkam-admin-parol
+DB_PATH=/data/fariks_lms.sqlite3
+```
+
+SQLite ma'lumotlari saqlanishi uchun Railway servisga Volume qo'shing va uni
+`/data` ga mount qiling. Public Networking yoqilgandan keyin Railway domeni
+test linklarda avtomatik ishlatiladi. Agar custom domen ishlatsangiz:
+
+```text
+PUBLIC_CLIENT_URL=https://sizning-domeningiz.uz
+```
+
 ## Bot oqimi
 
 Bot quyidagilarni bajaradi:
