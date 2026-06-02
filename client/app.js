@@ -217,6 +217,8 @@ function renderActiveTest() {
   const questions = data.questions;
   const current = questions[testState.current];
   const answeredCount = Object.keys(testState.answers).length;
+  const missingCount = questions.length - answeredCount;
+  const canFinish = missingCount === 0;
   const percent = Math.round((answeredCount * 100) / questions.length);
 
   renderShell(`
@@ -252,7 +254,10 @@ function renderActiveTest() {
             <button class="btn secondary" id="prevQuestion" ${testState.current === 0 ? "disabled" : ""}>Oldingi</button>
             <button class="btn secondary" id="nextQuestion" ${testState.current === questions.length - 1 ? "disabled" : ""}>Keyingi</button>
           </div>
-          <button class="btn success" id="finishTest">Yakunlash</button>
+          <div class="finish-wrap">
+            <span class="finish-hint">${canFinish ? "Barcha savollar belgilandi" : `${missingCount} ta savol javobsiz`}</span>
+            <button class="btn success" id="finishTest" ${canFinish ? "" : "disabled"}>Yakunlash</button>
+          </div>
         </div>
       </section>
 
@@ -471,6 +476,29 @@ function allLessons() {
   );
 }
 
+function emptyOption(label) {
+  return `<option value="" disabled selected>${escapeHtml(label)}</option>`;
+}
+
+function renderCourseOptions(courses) {
+  if (!courses.length) return emptyOption("Kurs yo'q");
+  return courses.map((course) => `<option value="${course.id}">${escapeHtml(course.title)}</option>`).join("");
+}
+
+function renderModuleOptions(modules) {
+  if (!modules.length) return emptyOption("Modul yo'q");
+  return modules
+    .map((module) => `<option value="${module.id}">${escapeHtml(module.course_title)} / ${escapeHtml(module.title)}</option>`)
+    .join("");
+}
+
+function renderLessonOptions(lessons) {
+  if (!lessons.length) return emptyOption("Dars yo'q");
+  return lessons
+    .map((lesson) => `<option value="${lesson.id}">${escapeHtml(lesson.course_title)} / ${escapeHtml(lesson.title)}</option>`)
+    .join("");
+}
+
 function renderAdminAccessPanel() {
   if (adminState.token && !adminState.error) {
     const name = adminState.me?.name || "Admin";
@@ -503,33 +531,49 @@ function renderAdmin() {
   const summary = adminState.summary || {};
   const modules = allModules();
   const lessons = allLessons();
+  const hasCourses = adminState.courses.length > 0;
+  const hasModules = modules.length > 0;
+  const hasLessons = lessons.length > 0;
   renderShell(`
     <div class="admin-grid">
       <aside class="admin-stack">
         ${renderAdminAccessPanel()}
 
-        <section class="panel pad">
-          <h2>Kurs yaratish</h2>
+        <section class="panel pad admin-form-card">
+          <div class="form-title">
+            <span class="step-badge">1</span>
+            <div>
+              <h2>Kurs yaratish</h2>
+              <p class="muted">Kurs nomi, narxi va qisqa tavsifi.</p>
+            </div>
+          </div>
           <form class="form-grid" id="courseForm">
-            <div class="field"><label>Kurs nomi</label><input name="title" required /></div>
-            <div class="field"><label>Narxi</label><input name="price" type="number" min="1" required /></div>
-            <div class="field"><label>Tavsif</label><textarea name="description"></textarea></div>
-            <button class="btn success">Qo'shish</button>
+            <div class="field"><label>Kurs nomi</label><input name="title" required placeholder="Milliy Sertifikat Matematika" /></div>
+            <div class="field"><label>Narxi</label><input name="price" type="number" min="1" required placeholder="300000" /></div>
+            <div class="field"><label>Tavsif</label><textarea name="description" placeholder="Kurs kimlar uchun va nimani o'rgatadi"></textarea></div>
+            <button class="btn success">Kursni saqlash</button>
           </form>
         </section>
 
-        <section class="panel pad">
-          <h2>Modul yaratish</h2>
+        <section class="panel pad admin-form-card">
+          <div class="form-title">
+            <span class="step-badge">2</span>
+            <div>
+              <h2>Modul yaratish</h2>
+              <p class="muted">Modul tanlangan kurs ichida ko'rinadi.</p>
+            </div>
+          </div>
           <form class="form-grid" id="moduleForm">
             <div class="field">
               <label>Kurs</label>
-              <select name="course_id" required>
-                ${adminState.courses.map((course) => `<option value="${course.id}">${escapeHtml(course.title)}</option>`).join("")}
+              <select name="course_id" required ${hasCourses ? "" : "disabled"}>
+                ${renderCourseOptions(adminState.courses)}
               </select>
             </div>
-            <div class="field"><label>Modul nomi</label><input name="title" required /></div>
+            <div class="field"><label>Modul nomi</label><input name="title" required placeholder="1-MODUL: Algebra asoslari" /></div>
             <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
-            <button class="btn success">Qo'shish</button>
+            ${hasCourses ? "" : `<p class="empty-hint">Avval kurs yarating.</p>`}
+            <button class="btn success" ${hasCourses ? "" : "disabled"}>Modulni saqlash</button>
           </form>
         </section>
       </aside>
@@ -548,43 +592,56 @@ function renderAdmin() {
                 ${statCard("Natijalar", summary.results)}
               </section>
 
-              <section class="panel pad">
-                <h2>Dars qo'shish</h2>
+              <section class="panel pad admin-form-card">
+                <div class="form-title">
+                  <span class="step-badge">3</span>
+                  <div>
+                    <h2>Dars qo'shish</h2>
+                    <p class="muted">Dars modul ichida ochiladi, test foizi keyingi darsni ochadi.</p>
+                  </div>
+                </div>
                 <form class="form-grid" id="lessonForm">
                   <div class="split">
                     <div class="field">
                       <label>Modul</label>
-                      <select name="module_id" required>
-                        ${modules.map((module) => `<option value="${module.id}">${escapeHtml(module.course_title)} / ${escapeHtml(module.title)}</option>`).join("")}
+                      <select name="module_id" required ${hasModules ? "" : "disabled"}>
+                        ${renderModuleOptions(modules)}
                       </select>
                     </div>
                     <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
                   </div>
-                  <div class="field"><label>Dars nomi</label><input name="title" required /></div>
+                  <div class="field"><label>Dars nomi</label><input name="title" required placeholder="1-Dars: Chiziqli tenglamalar" /></div>
                   <div class="field"><label>Video URL</label><input name="video_url" placeholder="https://..." /></div>
                   <div class="split">
                     <div class="field"><label>Vaqt, daqiqa</label><input name="duration_minutes" type="number" value="30" min="1" /></div>
                     <div class="field"><label>O'tish foizi</label><input name="pass_percent" type="number" value="80" min="1" max="100" /></div>
                   </div>
-                  <button class="btn success">Dars qo'shish</button>
+                  ${hasModules ? "" : `<p class="empty-hint">Avval modul yarating.</p>`}
+                  <button class="btn success" ${hasModules ? "" : "disabled"}>Darsni saqlash</button>
                 </form>
               </section>
 
-              <section class="panel pad">
-                <h2>Test savoli qo'shish</h2>
+              <section class="panel pad admin-form-card">
+                <div class="form-title">
+                  <span class="step-badge">4</span>
+                  <div>
+                    <h2>Test savoli qo'shish</h2>
+                    <p class="muted">Formulalarni $...$ ichida yozing.</p>
+                  </div>
+                </div>
                 <form class="form-grid" id="questionForm">
                   <div class="field">
                     <label>Dars</label>
-                    <select name="lesson_id" required>
-                      ${lessons.map((lesson) => `<option value="${lesson.id}">${escapeHtml(lesson.course_title)} / ${escapeHtml(lesson.title)}</option>`).join("")}
+                    <select name="lesson_id" required ${hasLessons ? "" : "disabled"}>
+                      ${renderLessonOptions(lessons)}
                     </select>
                   </div>
                   <div class="field"><label>Savol matni</label><textarea name="text" required placeholder="$\\frac{2x+3}{x-1}=5$ tenglamani yeching."></textarea></div>
-                  <div class="split">
-                    <div class="field"><label>A</label><input name="option_a" required /></div>
-                    <div class="field"><label>B</label><input name="option_b" required /></div>
-                    <div class="field"><label>C</label><input name="option_c" required /></div>
-                    <div class="field"><label>D</label><input name="option_d" required /></div>
+                  <div class="answer-grid">
+                    <div class="field"><label>A variant</label><input name="option_a" required placeholder="$4$" /></div>
+                    <div class="field"><label>B variant</label><input name="option_b" required placeholder="$5$" /></div>
+                    <div class="field"><label>C variant</label><input name="option_c" required placeholder="$\\frac{8}{3}$" /></div>
+                    <div class="field"><label>D variant</label><input name="option_d" required placeholder="$-1$" /></div>
                   </div>
                   <div class="split">
                     <div class="field">
@@ -593,8 +650,9 @@ function renderAdmin() {
                     </div>
                     <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
                   </div>
-                  <div class="field"><label>Izoh</label><textarea name="explanation"></textarea></div>
-                  <button class="btn success">Savol qo'shish</button>
+                  <div class="field"><label>Izoh</label><textarea name="explanation" placeholder="$2x+3=5x-5$, demak $x=\\frac{8}{3}$."></textarea></div>
+                  ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
+                  <button class="btn success" ${hasLessons ? "" : "disabled"}>Savolni saqlash</button>
                 </form>
               </section>
 
