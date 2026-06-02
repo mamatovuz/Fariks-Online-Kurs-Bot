@@ -27,7 +27,16 @@ Admin panel tokeni `.env` ichidagi `ADMIN_TOKEN` qiymati bilan kiriladi.
 ## Railway deploy
 
 Railway servisni GitHub repodan deploy qiling. Repo ichidagi `railway.json` serverni
-`python bot/app.py` bilan ishga tushiradi va `/api/health` orqali tekshiradi.
+`python app.py` bilan ishga tushiradi va `/api/health` orqali tekshiradi.
+
+Railway Settings ichida:
+
+```text
+Root Directory: bo'sh qoldiring
+Start Command: python app.py
+```
+
+Root Directory `bot` bo'lsa frontend deployga kirmaydi.
 
 Railway Variables bo'limiga quyidagilarni qo'shing:
 
