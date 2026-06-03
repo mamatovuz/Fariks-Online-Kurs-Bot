@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import base64
 import hashlib
+import html
 import json
 import mimetypes
 import os
@@ -1940,6 +1941,20 @@ class MongoDatabase:
         )
         return self.get_lesson(lesson_id)
 
+    def admin_update_lesson_video(self, lesson_id: int, video_url: str) -> dict:
+        lesson_id = int(lesson_id or 0)
+        video_url = str(video_url or "").strip()
+        if not lesson_id or not video_url:
+            raise ValueError("Dars va video kiritilishi kerak")
+        result = self.lessons.update_one({"id": lesson_id}, {"$set": {"video_url": video_url}})
+        if not result.matched_count:
+            raise ValueError("Dars topilmadi")
+        return self.get_lesson(lesson_id)
+
+    def admin_next_question_position(self, lesson_id: int) -> int:
+        row = self.questions.find_one({"lesson_id": int(lesson_id)}, sort=[("position", -1), ("id", -1)])
+        return int(row.get("position") or 0) + 1 if row else 1
+
     def admin_create_question(self, data: dict) -> dict:
         lesson_id = int(data.get("lesson_id") or 0)
         text = str(data.get("text", "")).strip()
@@ -2008,6 +2023,14 @@ class TelegramClient:
             payload["reply_markup"] = reply_markup
         self.request("sendMessage", payload)
 
+    def send_video(self, chat_id: int, video: str, caption: str = "", reply_markup: dict | None = None) -> None:
+        payload = {"chat_id": chat_id, "video": video, "caption": caption, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        result = self.request("sendVideo", payload)
+        if not result.get("ok") and caption:
+            self.send_message(chat_id, caption, reply_markup)
+
     def answer_callback(self, callback_id: str, text: str = "", show_alert: bool = False) -> None:
         payload = {"callback_query_id": callback_id, "text": text, "show_alert": show_alert}
         self.request("answerCallbackQuery", payload)
@@ -2047,6 +2070,191 @@ class FariksBot:
             "one_time_keyboard": True,
         }
 
+    def is_admin_user(self, user_id: int) -> bool:
+        return user_id in ADMIN_TELEGRAM_IDS
+
+    def admin_web_link(self, user_id: int, from_user: dict) -> str:
+        first_name = str(from_user.get("first_name") or "").strip()
+        last_name = str(from_user.get("last_name") or "").strip()
+        username = str(from_user.get("username") or "").strip()
+        name = " ".join(part for part in [first_name, last_name] if part).strip() or username or str(user_id)
+        token = create_admin_session_token(user_id, name, username)
+        return public_link("/admin", {"token": token})
+
+    def admin_keyboard(self, user_id: int, from_user: dict) -> dict:
+        link = self.admin_web_link(user_id, from_user)
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "Statistika", "callback_data": "admin:stats"},
+                    {"text": "Kurslar", "callback_data": "admin:courses"},
+                ],
+                [
+                    {"text": "Yangi kurs", "callback_data": "admin:add_course"},
+                    {"text": "Yangi modul", "callback_data": "admin:add_module"},
+                ],
+                [
+                    {"text": "Yangi dars", "callback_data": "admin:add_lesson"},
+                    {"text": "Darsga video", "callback_data": "admin:add_video"},
+                ],
+                [{"text": "Test savoli qo'shish", "callback_data": "admin:add_question"}],
+                [{"text": "Web admin panel", "url": link}],
+            ]
+        }
+
+    def show_admin_panel(self, chat_id: int, user_id: int, from_user: dict) -> None:
+        summary = self.db.admin_summary()
+        text = (
+            "<b>FARIKS admin panel</b>\n\n"
+            f"Kurslar: {summary['courses']}\n"
+            f"Darslar: {summary['lessons']}\n"
+            f"Savollar: {summary['questions']}\n"
+            f"O'quvchilar: {summary['students']}\n\n"
+            "Kerakli amalni tanlang."
+        )
+        self.telegram.send_message(chat_id, text, self.admin_keyboard(user_id, from_user))
+
+    def show_admin_stats(self, chat_id: int, user_id: int, from_user: dict) -> None:
+        summary = self.db.admin_summary()
+        text = (
+            "<b>Statistika</b>\n\n"
+            f"Kurslar: {summary['courses']}\n"
+            f"Modullar: {summary['modules']}\n"
+            f"Darslar: {summary['lessons']}\n"
+            f"Savollar: {summary['questions']}\n"
+            f"O'quvchilar: {summary['students']}\n"
+            f"To'lovlar: {summary['payments']}\n"
+            f"Natijalar: {summary['results']}"
+        )
+        self.telegram.send_message(chat_id, text, self.admin_keyboard(user_id, from_user))
+
+    def show_admin_courses(self, chat_id: int, user_id: int, from_user: dict) -> None:
+        courses = self.db.admin_courses()
+        if not courses:
+            self.telegram.send_message(chat_id, "Hali kurs yo'q.", self.admin_keyboard(user_id, from_user))
+            return
+        lines = ["<b>Kurslar</b>\n"]
+        for course in courses[:20]:
+            lessons_count = sum(len(module.get("lessons", [])) for module in course.get("modules", []))
+            question_count = sum(
+                lesson.get("question_count", 0)
+                for module in course.get("modules", [])
+                for lesson in module.get("lessons", [])
+            )
+            lines.append(
+                f"<b>{html.escape(course['title'])}</b>\n"
+                f"Narxi: {format_money(course['price'])}\n"
+                f"Modul: {len(course.get('modules', []))}, dars: {lessons_count}, savol: {question_count}\n"
+            )
+        self.telegram.send_message(chat_id, "\n".join(lines), self.admin_keyboard(user_id, from_user))
+
+    def show_admin_course_picker(self, chat_id: int, prefix: str, empty_text: str) -> None:
+        courses = self.db.list_courses()
+        if not courses:
+            self.telegram.send_message(chat_id, empty_text)
+            return
+        keyboard = [[{"text": course["title"][:55], "callback_data": f"{prefix}{course['id']}"}] for course in courses[:40]]
+        keyboard.append([{"text": "Orqaga", "callback_data": "admin:home"}])
+        self.telegram.send_message(chat_id, "Kursni tanlang:", {"inline_keyboard": keyboard})
+
+    def show_admin_module_picker(self, chat_id: int, prefix: str, empty_text: str) -> None:
+        modules = [(course, module) for course in self.db.admin_courses() for module in course.get("modules", [])]
+        if not modules:
+            self.telegram.send_message(chat_id, empty_text)
+            return
+        keyboard = [
+            [
+                {
+                    "text": f"{course['title'][:22]} / {module['title'][:28]}",
+                    "callback_data": f"{prefix}{module['id']}",
+                }
+            ]
+            for course, module in modules[:40]
+        ]
+        keyboard.append([{"text": "Orqaga", "callback_data": "admin:home"}])
+        self.telegram.send_message(chat_id, "Modulni tanlang:", {"inline_keyboard": keyboard})
+
+    def show_admin_lesson_picker(self, chat_id: int, prefix: str, empty_text: str) -> None:
+        lessons = [
+            (course, module, lesson)
+            for course in self.db.admin_courses()
+            for module in course.get("modules", [])
+            for lesson in module.get("lessons", [])
+        ]
+        if not lessons:
+            self.telegram.send_message(chat_id, empty_text)
+            return
+        keyboard = [
+            [
+                {
+                    "text": f"{course['title'][:18]} / {lesson['title'][:32]}",
+                    "callback_data": f"{prefix}{lesson['id']}",
+                }
+            ]
+            for course, module, lesson in lessons[:40]
+        ]
+        keyboard.append([{"text": "Orqaga", "callback_data": "admin:home"}])
+        self.telegram.send_message(chat_id, "Darsni tanlang:", {"inline_keyboard": keyboard})
+
+    @staticmethod
+    def formula_block(latex: str) -> str:
+        return f"\\[{latex}\\]"
+
+    @staticmethod
+    def combine_question_text(intro: str, latex: str = "") -> str:
+        intro = intro.strip()
+        if not latex:
+            return intro
+        return "\n".join(part for part in [intro, FariksBot.formula_block(latex)] if part)
+
+    @staticmethod
+    def extract_video_ref(message: dict, text: str) -> str:
+        if message.get("video", {}).get("file_id"):
+            return f"tgfile:{message['video']['file_id']}"
+        document = message.get("document") or {}
+        if document.get("file_id") and str(document.get("mime_type", "")).startswith("video/"):
+            return f"tgfile:{document['file_id']}"
+        return text.strip()
+
+    @staticmethod
+    def normalize_trig(value: str) -> str:
+        name = value.strip().lower()
+        if name in {"tg", "tan"}:
+            return "tan"
+        if name in {"ctg", "cot"}:
+            return "cot"
+        if name == "cos":
+            return "cos"
+        return "sin"
+
+    def start_admin_question_answers(self, chat_id: int, user_id: int, payload: dict, question_text: str) -> None:
+        payload["text"] = question_text
+        self.db.set_state(user_id, "admin_question_a", payload)
+        self.telegram.send_message(chat_id, "A variantni yozing.")
+
+    def finish_admin_question(self, chat_id: int, user_id: int, payload: dict) -> None:
+        lesson_id = int(payload.get("lesson_id") or 0)
+        position = (
+            self.db.admin_next_question_position(lesson_id)
+            if hasattr(self.db, "admin_next_question_position")
+            else len(self.db.get_questions(lesson_id)) + 1
+        )
+        self.db.admin_create_question(
+            {
+                "lesson_id": lesson_id,
+                "text": payload.get("text", ""),
+                "option_a": payload.get("option_a", ""),
+                "option_b": payload.get("option_b", ""),
+                "option_c": payload.get("option_c", ""),
+                "option_d": payload.get("option_d", ""),
+                "correct_option": payload.get("correct_option", "A"),
+                "explanation": payload.get("explanation", ""),
+                "position": position,
+            }
+        )
+        self.db.clear_state(user_id)
+        self.telegram.send_message(chat_id, "Savol saqlandi.", {"inline_keyboard": [[{"text": "Yana savol qo'shish", "callback_data": "admin:add_question"}, {"text": "Admin panel", "callback_data": "admin:home"}]]})
+
     def run(self) -> None:
         print("Telegram bot long-polling rejimida ishga tushdi.")
         while True:
@@ -2080,6 +2288,14 @@ class FariksBot:
             return
 
         state, payload = self.db.get_state(user_id)
+        if self.is_admin_user(user_id) and state and state.startswith("admin_"):
+            if command == "/cancel":
+                self.db.clear_state(user_id)
+                self.telegram.send_message(chat_id, "Admin amal bekor qilindi.", self.admin_keyboard(user_id, message.get("from", {})))
+                return
+            self.handle_admin_state_message(message, state, payload)
+            return
+
         if state == "awaiting_name":
             if len(text) < 3:
                 self.telegram.send_message(chat_id, "Iltimos, ism familiyangizni to'liq kiriting.")
@@ -2139,6 +2355,10 @@ class FariksBot:
             self.telegram.answer_callback(callback_id, "Bu bo'lim hali ochilmagan.", show_alert=True)
             return
 
+        if data.startswith("admin:"):
+            self.handle_admin_callback(chat_id, user_id, data, callback.get("from", {}))
+            return
+
         if not self.db.get_user(user_id):
             self.start(chat_id, user_id)
             return
@@ -2175,21 +2395,267 @@ class FariksBot:
         )
 
     def handle_admin_command(self, chat_id: int, user_id: int, from_user: dict) -> None:
-        if user_id not in ADMIN_TELEGRAM_IDS:
+        if not self.is_admin_user(user_id):
+            self.telegram.send_message(chat_id, "Bu bo'lim faqat admin uchun.")
+            return
+        self.db.clear_state(user_id)
+        self.show_admin_panel(chat_id, user_id, from_user)
+
+    def handle_admin_callback(self, chat_id: int, user_id: int, data: str, from_user: dict) -> None:
+        if not self.is_admin_user(user_id):
             self.telegram.send_message(chat_id, "Bu bo'lim faqat admin uchun.")
             return
 
-        first_name = str(from_user.get("first_name") or "").strip()
-        last_name = str(from_user.get("last_name") or "").strip()
-        username = str(from_user.get("username") or "").strip()
-        name = " ".join(part for part in [first_name, last_name] if part).strip() or username or str(user_id)
-        token = create_admin_session_token(user_id, name, username)
-        link = public_link("/admin", {"token": token})
-        self.telegram.send_message(
-            chat_id,
-            f"Admin kabinet:\n\n{link}",
-            {"inline_keyboard": [[{"text": "Admin kabinetga kirish", "url": link}]]},
-        )
+        if data == "admin:home":
+            self.db.clear_state(user_id)
+            self.show_admin_panel(chat_id, user_id, from_user)
+            return
+        if data == "admin:stats":
+            self.show_admin_stats(chat_id, user_id, from_user)
+            return
+        if data == "admin:courses":
+            self.show_admin_courses(chat_id, user_id, from_user)
+            return
+        if data == "admin:add_course":
+            self.db.set_state(user_id, "admin_course_title")
+            self.telegram.send_message(chat_id, "Yangi kurs nomini yozing.\n\nBekor qilish: /cancel")
+            return
+        if data == "admin:add_module":
+            self.show_admin_course_picker(chat_id, "admin:module_course:", "Avval kurs qo'shing.")
+            return
+        if data.startswith("admin:module_course:"):
+            course_id = int(data.rsplit(":", 1)[1])
+            self.db.set_state(user_id, "admin_module_title", {"course_id": course_id})
+            self.telegram.send_message(chat_id, "Modul nomini yozing.\n\nMasalan: 1-MODUL Algebra")
+            return
+        if data == "admin:add_lesson":
+            self.show_admin_module_picker(chat_id, "admin:lesson_module:", "Avval kurs va modul qo'shing.")
+            return
+        if data.startswith("admin:lesson_module:"):
+            module_id = int(data.rsplit(":", 1)[1])
+            self.db.set_state(user_id, "admin_lesson_title", {"module_id": module_id})
+            self.telegram.send_message(chat_id, "Dars nomini yozing.\n\nMasalan: 1-Dars Chiziqli tenglamalar")
+            return
+        if data == "admin:add_video":
+            self.show_admin_lesson_picker(chat_id, "admin:video_lesson:", "Avval dars qo'shing.")
+            return
+        if data.startswith("admin:video_lesson:"):
+            lesson_id = int(data.rsplit(":", 1)[1])
+            self.db.set_state(user_id, "admin_video_value", {"lesson_id": lesson_id})
+            self.telegram.send_message(chat_id, "Video link yuboring yoki Telegramga video fayl tashlang.")
+            return
+        if data == "admin:add_question":
+            self.show_admin_lesson_picker(chat_id, "admin:question_lesson:", "Avval dars qo'shing.")
+            return
+        if data.startswith("admin:question_lesson:"):
+            lesson_id = int(data.rsplit(":", 1)[1])
+            keyboard = {
+                "inline_keyboard": [
+                    [
+                        {"text": "Oddiy matn", "callback_data": f"admin:qtype:text:{lesson_id}"},
+                        {"text": "Kasr", "callback_data": f"admin:qtype:fraction:{lesson_id}"},
+                    ],
+                    [
+                        {"text": "Ildiz", "callback_data": f"admin:qtype:sqrt:{lesson_id}"},
+                        {"text": "Daraja", "callback_data": f"admin:qtype:power:{lesson_id}"},
+                    ],
+                    [
+                        {"text": "Log", "callback_data": f"admin:qtype:log:{lesson_id}"},
+                        {"text": "Trigonometria", "callback_data": f"admin:qtype:trig:{lesson_id}"},
+                    ],
+                ]
+            }
+            self.telegram.send_message(chat_id, "Savol turini tanlang:", keyboard)
+            return
+        if data.startswith("admin:qtype:"):
+            _, _, kind, lesson_id = data.split(":", 3)
+            self.db.set_state(user_id, "admin_question_prompt", {"lesson_id": int(lesson_id), "kind": kind})
+            self.telegram.send_message(chat_id, "Savol matnini yozing.\n\nMasalan: Tenglamani yeching.")
+            return
+
+    def handle_admin_state_message(self, message: dict, state: str, payload: dict) -> None:
+        chat_id = int(message["chat"]["id"])
+        user_id = int(message["from"]["id"])
+        text = str(message.get("text", "")).strip()
+
+        if state == "admin_course_title":
+            if len(text) < 3:
+                self.telegram.send_message(chat_id, "Kurs nomini to'liq yozing.")
+                return
+            self.db.set_state(user_id, "admin_course_price", {"title": text})
+            self.telegram.send_message(chat_id, "Kurs narxini yozing.\n\nMasalan: 300000")
+            return
+
+        if state == "admin_course_price":
+            price = int(re.sub(r"\D+", "", text) or 0)
+            if price <= 0:
+                self.telegram.send_message(chat_id, "Narxni raqam bilan yozing. Masalan: 300000")
+                return
+            payload["price"] = price
+            self.db.set_state(user_id, "admin_course_description", payload)
+            self.telegram.send_message(chat_id, "Kurs tavsifini yozing. Agar kerak bo'lmasa - yuboring.")
+            return
+
+        if state == "admin_course_description":
+            payload["description"] = "" if text == "-" else text
+            course = self.db.admin_create_course(payload)
+            self.db.clear_state(user_id)
+            self.telegram.send_message(chat_id, f"Kurs qo'shildi: <b>{html.escape(course['title'])}</b>", self.admin_keyboard(user_id, message.get("from", {})))
+            return
+
+        if state == "admin_module_title":
+            if len(text) < 2:
+                self.telegram.send_message(chat_id, "Modul nomini yozing.")
+                return
+            payload["title"] = text
+            self.db.set_state(user_id, "admin_module_position", payload)
+            self.telegram.send_message(chat_id, "Modul tartib raqamini yozing. Masalan: 1")
+            return
+
+        if state == "admin_module_position":
+            payload["position"] = int(re.sub(r"\D+", "", text) or 1)
+            module = self.db.admin_create_module(payload)
+            self.db.clear_state(user_id)
+            self.telegram.send_message(chat_id, f"Modul qo'shildi: <b>{html.escape(module['title'])}</b>", self.admin_keyboard(user_id, message.get("from", {})))
+            return
+
+        if state == "admin_lesson_title":
+            if len(text) < 2:
+                self.telegram.send_message(chat_id, "Dars nomini yozing.")
+                return
+            payload["title"] = text
+            self.db.set_state(user_id, "admin_lesson_video", payload)
+            self.telegram.send_message(chat_id, "Dars videosini yuboring: video fayl, video link yoki -.")
+            return
+
+        if state == "admin_lesson_video":
+            video_ref = self.extract_video_ref(message, text)
+            payload["video_url"] = "" if video_ref == "-" else video_ref
+            self.db.set_state(user_id, "admin_lesson_duration", payload)
+            self.telegram.send_message(chat_id, "Test vaqti necha daqiqa bo'lsin? Masalan: 30")
+            return
+
+        if state == "admin_lesson_duration":
+            payload["duration_minutes"] = int(re.sub(r"\D+", "", text) or 30)
+            self.db.set_state(user_id, "admin_lesson_pass", payload)
+            self.telegram.send_message(chat_id, "O'tish foizini yozing. Masalan: 80")
+            return
+
+        if state == "admin_lesson_pass":
+            pass_percent = int(re.sub(r"\D+", "", text) or 80)
+            payload["pass_percent"] = min(100, max(1, pass_percent))
+            payload["position"] = len(self.db.list_module_lessons(int(payload["module_id"]))) + 1
+            lesson = self.db.admin_create_lesson(payload)
+            self.db.clear_state(user_id)
+            self.telegram.send_message(chat_id, f"Dars qo'shildi: <b>{html.escape(lesson['title'])}</b>", self.admin_keyboard(user_id, message.get("from", {})))
+            return
+
+        if state == "admin_video_value":
+            video_ref = self.extract_video_ref(message, text)
+            if not video_ref:
+                self.telegram.send_message(chat_id, "Video link yuboring yoki Telegramga video fayl tashlang.")
+                return
+            lesson = self.db.admin_update_lesson_video(int(payload["lesson_id"]), video_ref)
+            self.db.clear_state(user_id)
+            self.telegram.send_message(chat_id, f"Video saqlandi: <b>{html.escape(lesson['title'])}</b>", self.admin_keyboard(user_id, message.get("from", {})))
+            return
+
+        if state == "admin_question_prompt":
+            if len(text) < 2:
+                self.telegram.send_message(chat_id, "Savol matnini yozing.")
+                return
+            payload["intro"] = text
+            kind = payload.get("kind", "text")
+            if kind == "text":
+                self.start_admin_question_answers(chat_id, user_id, payload, text)
+            elif kind == "fraction":
+                self.db.set_state(user_id, "admin_question_fraction_top", payload)
+                self.telegram.send_message(chat_id, "Kasr ustini yozing. Masalan: 2x+3")
+            elif kind == "sqrt":
+                self.db.set_state(user_id, "admin_question_sqrt_first", payload)
+                self.telegram.send_message(chat_id, "1-ildiz ichini yozing. Masalan: x+4")
+            elif kind == "power":
+                self.db.set_state(user_id, "admin_question_power_base", payload)
+                self.telegram.send_message(chat_id, "Asosni yozing. Masalan: x")
+            elif kind == "log":
+                self.db.set_state(user_id, "admin_question_log_base", payload)
+                self.telegram.send_message(chat_id, "Log asosini yozing. Masalan: 2")
+            else:
+                self.db.set_state(user_id, "admin_question_trig_fn", payload)
+                self.telegram.send_message(chat_id, "Funksiyani yozing: sin, cos, tg yoki ctg")
+            return
+
+        formula_steps = {
+            "admin_question_fraction_top": ("top", "admin_question_fraction_bottom", "Kasr ostini yozing. Masalan: x-1"),
+            "admin_question_fraction_bottom": ("bottom", "admin_question_fraction_right", "Tenglikdan keyingi sonni yozing. Masalan: 5"),
+            "admin_question_sqrt_first": ("first", "admin_question_sqrt_second", "2-ildiz ichini yozing. Masalan: x-1"),
+            "admin_question_sqrt_second": ("second", "admin_question_sqrt_right", "Tenglikdan keyingi sonni yozing. Masalan: 5"),
+            "admin_question_power_base": ("base", "admin_question_power_degree", "Darajani yozing. Masalan: 2"),
+            "admin_question_power_degree": ("degree", "admin_question_power_extra", "Davomini yozing. Masalan: +3x+2. Kerak bo'lmasa - yuboring."),
+            "admin_question_power_extra": ("extra", "admin_question_power_right", "Tenglikdan keyingi sonni yozing. Masalan: 0"),
+            "admin_question_log_base": ("base", "admin_question_log_inside", "Log ichidagi ifodani yozing. Masalan: x+1"),
+            "admin_question_log_inside": ("inside", "admin_question_log_right", "Tenglikdan keyingi sonni yozing. Masalan: 3"),
+            "admin_question_trig_fn": ("fn", "admin_question_trig_angle", "Burchak yoki ifodani yozing. Masalan: x"),
+            "admin_question_trig_angle": ("angle", "admin_question_trig_right", "Tenglikdan keyingi qiymatni yozing. Masalan: 0"),
+        }
+        if state in formula_steps:
+            key, next_state, prompt = formula_steps[state]
+            payload[key] = "" if text == "-" else text
+            self.db.set_state(user_id, next_state, payload)
+            self.telegram.send_message(chat_id, prompt)
+            return
+
+        if state == "admin_question_fraction_right":
+            latex = f"\\frac{{{payload.get('top', '')}}}{{{payload.get('bottom', '')}}}={text}"
+            self.start_admin_question_answers(chat_id, user_id, payload, self.combine_question_text(payload.get("intro", ""), latex))
+            return
+        if state == "admin_question_sqrt_right":
+            latex = f"\\sqrt{{{payload.get('first', '')}}}+\\sqrt{{{payload.get('second', '')}}}={text}"
+            self.start_admin_question_answers(chat_id, user_id, payload, self.combine_question_text(payload.get("intro", ""), latex))
+            return
+        if state == "admin_question_power_right":
+            extra = payload.get("extra", "")
+            latex = f"{payload.get('base', '')}^{{{payload.get('degree', '')}}}{extra}={text}"
+            self.start_admin_question_answers(chat_id, user_id, payload, self.combine_question_text(payload.get("intro", ""), latex))
+            return
+        if state == "admin_question_log_right":
+            latex = f"\\log_{{{payload.get('base', '')}}}\\left({payload.get('inside', '')}\\right)={text}"
+            self.start_admin_question_answers(chat_id, user_id, payload, self.combine_question_text(payload.get("intro", ""), latex))
+            return
+        if state == "admin_question_trig_right":
+            fn = self.normalize_trig(payload.get("fn", "sin"))
+            latex = f"\\{fn}\\left({payload.get('angle', '')}\\right)={text}"
+            self.start_admin_question_answers(chat_id, user_id, payload, self.combine_question_text(payload.get("intro", ""), latex))
+            return
+
+        if state in {"admin_question_a", "admin_question_b", "admin_question_c", "admin_question_d"}:
+            key = state[-1]
+            payload[f"option_{key}"] = text
+            next_map = {
+                "admin_question_a": ("admin_question_b", "B variantni yozing."),
+                "admin_question_b": ("admin_question_c", "C variantni yozing."),
+                "admin_question_c": ("admin_question_d", "D variantni yozing."),
+                "admin_question_d": ("admin_question_correct", "To'g'ri javobni yozing: A, B, C yoki D"),
+            }
+            next_state, prompt = next_map[state]
+            self.db.set_state(user_id, next_state, payload)
+            self.telegram.send_message(chat_id, prompt)
+            return
+
+        if state == "admin_question_correct":
+            correct = text.upper()
+            if correct not in {"A", "B", "C", "D"}:
+                self.telegram.send_message(chat_id, "Faqat A, B, C yoki D yozing.")
+                return
+            payload["correct_option"] = correct
+            self.db.set_state(user_id, "admin_question_explanation", payload)
+            self.telegram.send_message(chat_id, "Izoh yozing. Kerak bo'lmasa - yuboring.")
+            return
+
+        if state == "admin_question_explanation":
+            payload["explanation"] = "" if text == "-" else text
+            self.finish_admin_question(chat_id, user_id, payload)
+            return
 
     def show_courses(self, chat_id: int) -> None:
         courses = self.db.list_courses()
@@ -2274,11 +2740,12 @@ class FariksBot:
             self.telegram.send_message(chat_id, "Bu dars hali ochilmagan.")
             return
         video_line = lesson["video_url"] or "Video dars fayli admin tomonidan qo'shiladi."
-        self.telegram.send_message(
-            chat_id,
-            f"🎥 <b>{lesson['title']}</b>\n\n{video_line}",
-            {"inline_keyboard": [[{"text": "📝 Testni boshlash", "callback_data": f"test:{lesson_id}"}]]},
-        )
+        keyboard = {"inline_keyboard": [[{"text": "Testni boshlash", "callback_data": f"test:{lesson_id}"}]]}
+        title = html.escape(str(lesson["title"]))
+        if str(video_line).startswith("tgfile:"):
+            self.telegram.send_video(chat_id, video_line.replace("tgfile:", "", 1), f"<b>{title}</b>", keyboard)
+            return
+        self.telegram.send_message(chat_id, f"<b>{title}</b>\n\n{html.escape(str(video_line))}", keyboard)
 
     def send_test_link(self, chat_id: int, user_id: int, lesson_id: int) -> None:
         try:
@@ -2495,6 +2962,8 @@ def make_handler(db: Database, telegram: TelegramClient):
                 self.send_json({"ok": True, "data": db.admin_create_module(body)}, status=201)
             elif path == "/api/admin/lessons":
                 self.send_json({"ok": True, "data": db.admin_create_lesson(body)}, status=201)
+            elif path == "/api/admin/lessons/video":
+                self.send_json({"ok": True, "data": db.admin_update_lesson_video(body.get("lesson_id"), body.get("video_url"))})
             elif path == "/api/admin/questions":
                 self.send_json({"ok": True, "data": db.admin_create_question(body)}, status=201)
             else:

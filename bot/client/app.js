@@ -499,6 +499,187 @@ function renderLessonOptions(lessons) {
     .join("");
 }
 
+const formulaTemplates = [
+  {
+    id: "none",
+    label: "Formula yo'q",
+    title: "Oddiy savol",
+    fields: [],
+    build: () => "",
+  },
+  {
+    id: "fraction",
+    label: "Kasr",
+    title: "Kasrli tenglama",
+    fields: [
+      ["top", "Kasr usti", "2x+3"],
+      ["bottom", "Kasr osti", "x-1"],
+      ["right", "Tenglikdan keyin", "5"],
+    ],
+    build: (v) => `\\frac{${v.top}}{${v.bottom}}=${v.right}`,
+  },
+  {
+    id: "sqrt",
+    label: "Ildiz",
+    title: "Ildizli tenglama",
+    fields: [
+      ["first", "1-ildiz ichi", "x+4"],
+      ["second", "2-ildiz ichi", "x-1"],
+      ["right", "Tenglikdan keyin", "5"],
+    ],
+    build: (v) => `\\sqrt{${v.first}}+\\sqrt{${v.second}}=${v.right}`,
+  },
+  {
+    id: "power",
+    label: "Daraja",
+    title: "Darajali ifoda",
+    fields: [
+      ["base", "Asos", "x"],
+      ["degree", "Daraja", "2"],
+      ["extra", "Davomi", "+3x+2"],
+      ["right", "Tenglikdan keyin", "0"],
+    ],
+    build: (v) => `${v.base}^{${v.degree}}${v.extra || ""}=${v.right}`,
+  },
+  {
+    id: "log",
+    label: "Log",
+    title: "Logarifm",
+    fields: [
+      ["base", "Log asos", "2"],
+      ["inside", "Log ichida", "x+1"],
+      ["right", "Tenglikdan keyin", "3"],
+    ],
+    build: (v) => `\\log_{${v.base}}\\left(${v.inside}\\right)=${v.right}`,
+  },
+  {
+    id: "trig",
+    label: "Trigonometria",
+    title: "Trigonometrik tenglama",
+    fields: [
+      ["fn", "Funksiya", "sin"],
+      ["angle", "Burchak yoki ifoda", "x"],
+      ["right", "Tenglikdan keyin", "0"],
+    ],
+    build: (v) => `\\${normalizeTrigName(v.fn)}\\left(${v.angle}\\right)=${v.right}`,
+  },
+];
+
+function normalizeTrigName(value) {
+  const name = String(value || "sin").trim().toLowerCase();
+  if (name === "tg" || name === "tan") return "tan";
+  if (name === "ctg" || name === "cot") return "cot";
+  if (name === "cos") return "cos";
+  return "sin";
+}
+
+function renderFormulaTools() {
+  return formulaTemplates
+    .map(
+      (item, index) => `
+        <button class="formula-tool ${index === 0 ? "active" : ""}" type="button" data-formula-template="${item.id}">
+          ${escapeHtml(item.label)}
+        </button>
+      `,
+    )
+    .join("");
+}
+
+function renderFormulaFields() {
+  return formulaTemplates
+    .filter((item) => item.id !== "none")
+    .map(
+      (item) => `
+        <div class="formula-fields ${item.id === "fraction" ? "active" : ""}" data-formula-panel="${item.id}">
+          <div class="formula-title">${escapeHtml(item.title)}</div>
+          <div class="formula-input-grid">
+            ${item.fields
+              .map(
+                ([key, label, placeholder]) => `
+                  <div class="field">
+                    <label>${escapeHtml(label)}</label>
+                    <input data-formula-input="${item.id}:${key}" placeholder="${escapeHtml(placeholder)}" />
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function activeFormulaTemplate() {
+  const active = document.querySelector("[data-formula-template].active");
+  return formulaTemplates.find((item) => item.id === active?.dataset.formulaTemplate) || formulaTemplates[0];
+}
+
+function formulaValues(template) {
+  return Object.fromEntries(
+    template.fields.map(([key]) => [
+      key,
+      document.querySelector(`[data-formula-input="${template.id}:${key}"]`)?.value.trim() || "",
+    ]),
+  );
+}
+
+function buildFormulaLatex() {
+  const template = activeFormulaTemplate();
+  if (template.id === "none") return "";
+  const values = formulaValues(template);
+  const required = template.fields.filter(([key]) => key !== "extra").every(([key]) => values[key]);
+  return required ? template.build(values) : "";
+}
+
+function buildQuestionText() {
+  const intro = document.getElementById("questionIntro")?.value.trim() || "";
+  const latex = buildFormulaLatex();
+  if (!latex) return intro;
+  return [intro, `\\[${latex}\\]`].filter(Boolean).join("\n");
+}
+
+function updateQuestionPreview() {
+  const preview = document.getElementById("questionPreview");
+  if (!preview) return;
+  const text = buildQuestionText() || "Savol ko'rinishi shu yerda chiqadi.";
+  const options = ["A", "B", "C", "D"]
+    .map((key) => {
+      const value = document.querySelector(`[name="option_${key.toLowerCase()}"]`)?.value.trim() || "...";
+      return `<div><strong>${key}</strong><span>${escapeHtml(value)}</span></div>`;
+    })
+    .join("");
+  preview.innerHTML = `
+    <div class="preview-question">${escapeHtml(text)}</div>
+    <div class="preview-options">${options}</div>
+  `;
+  typeset();
+}
+
+function bindFormulaBuilder() {
+  const tools = [...document.querySelectorAll("[data-formula-template]")];
+  if (!tools.length) return;
+  const syncPanels = () => {
+    const template = activeFormulaTemplate();
+    document.querySelectorAll("[data-formula-panel]").forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.formulaPanel === template.id);
+    });
+    updateQuestionPreview();
+  };
+  tools.forEach((button) => {
+    button.addEventListener("click", () => {
+      tools.forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      syncPanels();
+    });
+  });
+  document.querySelectorAll("#questionForm input, #questionForm textarea, #questionForm select").forEach((field) => {
+    field.addEventListener("input", updateQuestionPreview);
+    field.addEventListener("change", updateQuestionPreview);
+  });
+  syncPanels();
+}
+
 function renderAdminAccessPanel() {
   if (adminState.token && !adminState.error) {
     const name = adminState.me?.name || "Admin";
@@ -623,10 +804,31 @@ function renderAdmin() {
 
               <section class="panel pad admin-form-card">
                 <div class="form-title">
+                  <span class="step-badge">3A</span>
+                  <div>
+                    <h2>Dars videosini yangilash</h2>
+                    <p class="muted">Mavjud darsga YouTube, Vimeo yoki boshqa video havola kiriting.</p>
+                  </div>
+                </div>
+                <form class="form-grid" id="videoForm">
+                  <div class="field">
+                    <label>Dars</label>
+                    <select name="lesson_id" required ${hasLessons ? "" : "disabled"}>
+                      ${renderLessonOptions(lessons)}
+                    </select>
+                  </div>
+                  <div class="field"><label>Video URL</label><input name="video_url" required placeholder="https://..." /></div>
+                  ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
+                  <button class="btn success" ${hasLessons ? "" : "disabled"}>Videoni saqlash</button>
+                </form>
+              </section>
+
+              <section class="panel pad admin-form-card">
+                <div class="form-title">
                   <span class="step-badge">4</span>
                   <div>
                     <h2>Test savoli qo'shish</h2>
-                    <p class="muted">Formulalarni $...$ ichida yozing.</p>
+                    <p class="muted">Formula kodi kerak emas: tugmani tanlab, bo'sh joylarni to'ldiring.</p>
                   </div>
                 </div>
                 <form class="form-grid" id="questionForm">
@@ -636,12 +838,20 @@ function renderAdmin() {
                       ${renderLessonOptions(lessons)}
                     </select>
                   </div>
-                  <div class="field"><label>Savol matni</label><textarea name="text" required placeholder="$\\frac{2x+3}{x-1}=5$ tenglamani yeching."></textarea></div>
+                  <div class="field">
+                    <label>Savol matni</label>
+                    <textarea id="questionIntro" name="question_intro" required placeholder="Tenglamani yeching."></textarea>
+                  </div>
+                  <div class="formula-builder">
+                    <label>Formula qo'shish</label>
+                    <div class="formula-toolbar">${renderFormulaTools()}</div>
+                    ${renderFormulaFields()}
+                  </div>
                   <div class="answer-grid">
-                    <div class="field"><label>A variant</label><input name="option_a" required placeholder="$4$" /></div>
-                    <div class="field"><label>B variant</label><input name="option_b" required placeholder="$5$" /></div>
-                    <div class="field"><label>C variant</label><input name="option_c" required placeholder="$\\frac{8}{3}$" /></div>
-                    <div class="field"><label>D variant</label><input name="option_d" required placeholder="$-1$" /></div>
+                    <div class="field"><label>A variant</label><input name="option_a" required placeholder="4" /></div>
+                    <div class="field"><label>B variant</label><input name="option_b" required placeholder="5" /></div>
+                    <div class="field"><label>C variant</label><input name="option_c" required placeholder="8/3" /></div>
+                    <div class="field"><label>D variant</label><input name="option_d" required placeholder="-1" /></div>
                   </div>
                   <div class="split">
                     <div class="field">
@@ -650,7 +860,8 @@ function renderAdmin() {
                     </div>
                     <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
                   </div>
-                  <div class="field"><label>Izoh</label><textarea name="explanation" placeholder="$2x+3=5x-5$, demak $x=\\frac{8}{3}$."></textarea></div>
+                  <div class="field"><label>Izoh</label><textarea name="explanation" placeholder="Tenglamani yechganda x=8/3 chiqadi."></textarea></div>
+                  <div class="question-preview" id="questionPreview"></div>
                   ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
                   <button class="btn success" ${hasLessons ? "" : "disabled"}>Savolni saqlash</button>
                 </form>
@@ -835,11 +1046,22 @@ function bindAdminEvents() {
     adminState.message = "Dars qo'shildi.";
     await loadAdminData();
   });
+  bindForm("videoForm", async (data) => {
+    await apiPost("/api/admin/lessons/video", data, true);
+    adminState.message = "Dars videosi yangilandi.";
+    await loadAdminData();
+  });
   bindForm("questionForm", async (data) => {
+    if (activeFormulaTemplate().id !== "none" && !buildFormulaLatex()) {
+      throw new Error("Formula uchun ochilgan maydonlarni to'liq to'ldiring.");
+    }
+    data.text = buildQuestionText();
+    delete data.question_intro;
     await apiPost("/api/admin/questions", data, true);
     adminState.message = "Savol qo'shildi.";
     await loadAdminData();
   });
+  bindFormulaBuilder();
 }
 
 function bindForm(id, handler) {

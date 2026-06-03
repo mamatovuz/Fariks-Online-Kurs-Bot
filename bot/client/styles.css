@@ -654,6 +654,116 @@ h3 {
   gap: 12px;
 }
 
+.formula-builder {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.formula-builder > label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.formula-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.formula-tool {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 11px;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.formula-tool.active {
+  border-color: var(--green);
+  background: #eaf8f1;
+  color: var(--green);
+}
+
+.formula-fields {
+  display: none;
+  gap: 10px;
+}
+
+.formula-fields.active {
+  display: grid;
+}
+
+.formula-title {
+  color: var(--ink);
+  font-weight: 900;
+}
+
+.formula-input-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.question-preview {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px dashed #b9c6d8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.preview-question {
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.preview-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.preview-options div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.preview-options strong {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+  font-size: 13px;
+}
+
+.preview-options span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-weight: 700;
+}
+
 .empty-hint {
   margin: 0;
   padding: 10px 12px;
@@ -752,6 +862,10 @@ tr:last-child td {
   .meta-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .formula-input-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 620px) {
@@ -803,7 +917,8 @@ tr:last-child td {
   .meta-row,
   .split,
   .answer-pair,
-  .answer-grid {
+  .answer-grid,
+  .preview-options {
     grid-template-columns: 1fr;
   }
 }
