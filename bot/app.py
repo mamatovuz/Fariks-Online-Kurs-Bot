@@ -1614,6 +1614,7 @@ class MongoDatabase:
             item = {
                 "id": row["id"],
                 "text": row["text"],
+                "image_data": row.get("image_data", ""),
                 "position": row["position"],
                 "options": {"A": row["option_a"], "B": row["option_b"], "C": row["option_c"], "D": row["option_d"]},
             }
@@ -1733,6 +1734,7 @@ class MongoDatabase:
                     "id": question["id"],
                     "position": question["position"],
                     "text": question["text"],
+                    "image_data": question.get("image_data", ""),
                     "options": question["options"],
                     "selected": selected,
                     "selected_text": question["options"].get(selected, "") if selected else "",
@@ -1958,6 +1960,7 @@ class MongoDatabase:
     def admin_create_question(self, data: dict) -> dict:
         lesson_id = int(data.get("lesson_id") or 0)
         text = str(data.get("text", "")).strip()
+        image_data = str(data.get("image_data", "")).strip()
         correct = str(data.get("correct_option", "")).strip().upper()
         options = data.get("options") or {}
         option_a = str(data.get("option_a") or options.get("A") or "").strip()
@@ -1966,7 +1969,9 @@ class MongoDatabase:
         option_d = str(data.get("option_d") or options.get("D") or "").strip()
         explanation = str(data.get("explanation", "")).strip()
         position = int(data.get("position") or 1)
-        if not lesson_id or not text or correct not in {"A", "B", "C", "D"}:
+        if image_data and (not image_data.startswith("data:image/") or len(image_data) > 2_500_000):
+            raise ValueError("Rasm hajmi katta yoki noto'g'ri formatda")
+        if not lesson_id or (not text and not image_data) or correct not in {"A", "B", "C", "D"}:
             raise ValueError("Savol, dars va to'g'ri javob kiritilishi kerak")
         if not all([option_a, option_b, option_c, option_d]):
             raise ValueError("A, B, C, D variantlari to'liq kiritilishi kerak")
@@ -1976,6 +1981,7 @@ class MongoDatabase:
             "id": question_id,
             "lesson_id": lesson_id,
             "text": text,
+            "image_data": image_data,
             "option_a": option_a,
             "option_b": option_b,
             "option_c": option_c,
@@ -2030,6 +2036,22 @@ class TelegramClient:
         result = self.request("sendVideo", payload)
         if not result.get("ok") and caption:
             self.send_message(chat_id, caption, reply_markup)
+
+    def download_file_data_url(self, file_id: str, default_mime: str = "image/jpeg") -> str:
+        result = self.request("getFile", {"file_id": file_id}, timeout=20)
+        if not result.get("ok"):
+            raise ValueError("Telegram faylini olishda xatolik")
+        file_path = result.get("result", {}).get("file_path", "")
+        if not file_path:
+            raise ValueError("Telegram fayl yo'li topilmadi")
+        mime_type = mimetypes.guess_type(file_path)[0] or default_mime
+        url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+        with urllib.request.urlopen(url, timeout=40) as response:
+            raw = response.read()
+        if len(raw) > 2_200_000:
+            raise ValueError("Rasm juda katta. Web admin panelda qirqib kichraytiring.")
+        encoded = base64.b64encode(raw).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
 
     def answer_callback(self, callback_id: str, text: str = "", show_alert: bool = False) -> None:
         payload = {"callback_query_id": callback_id, "text": text, "show_alert": show_alert}
@@ -2216,6 +2238,15 @@ class FariksBot:
             return f"tgfile:{document['file_id']}"
         return text.strip()
 
+    def extract_photo_data(self, message: dict) -> str:
+        photos = message.get("photo") or []
+        if photos:
+            return self.telegram.download_file_data_url(photos[-1]["file_id"], "image/jpeg")
+        document = message.get("document") or {}
+        if document.get("file_id") and str(document.get("mime_type", "")).startswith("image/"):
+            return self.telegram.download_file_data_url(document["file_id"], document.get("mime_type") or "image/jpeg")
+        return ""
+
     @staticmethod
     def normalize_trig(value: str) -> str:
         name = value.strip().lower()
@@ -2249,6 +2280,7 @@ class FariksBot:
                 "option_d": payload.get("option_d", ""),
                 "correct_option": payload.get("correct_option", "A"),
                 "explanation": payload.get("explanation", ""),
+                "image_data": payload.get("image_data", ""),
                 "position": position,
             }
         )
@@ -2463,12 +2495,17 @@ class FariksBot:
                         {"text": "Log", "callback_data": f"admin:qtype:log:{lesson_id}"},
                         {"text": "Trigonometria", "callback_data": f"admin:qtype:trig:{lesson_id}"},
                     ],
+                    [{"text": "Rasmli savol", "callback_data": f"admin:qtype:image:{lesson_id}"}],
                 ]
             }
             self.telegram.send_message(chat_id, "Savol turini tanlang:", keyboard)
             return
         if data.startswith("admin:qtype:"):
             _, _, kind, lesson_id = data.split(":", 3)
+            if kind == "image":
+                self.db.set_state(user_id, "admin_question_image", {"lesson_id": int(lesson_id), "kind": kind})
+                self.telegram.send_message(chat_id, "Rasm yuboring. Qirqish kerak bo'lsa web admin paneldan foydalaning.")
+                return
             self.db.set_state(user_id, "admin_question_prompt", {"lesson_id": int(lesson_id), "kind": kind})
             self.telegram.send_message(chat_id, "Savol matnini yozing.\n\nMasalan: Tenglamani yeching.")
             return
@@ -2558,6 +2595,25 @@ class FariksBot:
             lesson = self.db.admin_update_lesson_video(int(payload["lesson_id"]), video_ref)
             self.db.clear_state(user_id)
             self.telegram.send_message(chat_id, f"Video saqlandi: <b>{html.escape(lesson['title'])}</b>", self.admin_keyboard(user_id, message.get("from", {})))
+            return
+
+        if state == "admin_question_image":
+            try:
+                image_data = self.extract_photo_data(message)
+            except ValueError as error:
+                self.telegram.send_message(chat_id, str(error))
+                return
+            if not image_data:
+                self.telegram.send_message(chat_id, "Rasm yuboring yoki image fayl tashlang.")
+                return
+            payload["image_data"] = image_data
+            self.db.set_state(user_id, "admin_question_image_intro", payload)
+            self.telegram.send_message(chat_id, "Savol matnini yozing. Kerak bo'lmasa - yuboring.")
+            return
+
+        if state == "admin_question_image_intro":
+            intro = "" if text == "-" else text
+            self.start_admin_question_answers(chat_id, user_id, payload, intro)
             return
 
         if state == "admin_question_prompt":

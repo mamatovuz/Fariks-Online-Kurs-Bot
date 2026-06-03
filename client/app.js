@@ -40,6 +40,15 @@ const adminState = {
   results: [],
 };
 
+const imageCropState = {
+  image: null,
+  selection: null,
+  dragging: false,
+  startX: 0,
+  startY: 0,
+  croppedData: "",
+};
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -51,6 +60,14 @@ function escapeHtml(value) {
 
 function money(amount) {
   return `${Number(amount || 0).toLocaleString("uz-UZ")} so'm`;
+}
+
+function renderRichText(value) {
+  return escapeHtml(value).replace(/\n/g, "<br>");
+}
+
+function renderQuestionImage(src, className = "question-image") {
+  return src ? `<img class="${className}" src="${escapeHtml(src)}" alt="Test rasmi" />` : "";
 }
 
 function typeset() {
@@ -233,7 +250,8 @@ function renderActiveTest() {
         </div>
         <div class="progress-track"><div class="progress-bar" style="width:${percent}%"></div></div>
         <div class="question-body">
-          <div class="question-text">${escapeHtml(current.text)}</div>
+          ${renderQuestionImage(current.image_data)}
+          ${current.text ? `<div class="question-text">${renderRichText(current.text)}</div>` : ""}
           <div class="options">
             ${["A", "B", "C", "D"]
               .map((key) => {
@@ -241,7 +259,7 @@ function renderActiveTest() {
                 return `
                   <button class="option${selected}" data-option="${key}">
                     <span class="option-key">${key}</span>
-                    <span>${escapeHtml(current.options[key])}</span>
+                    <span>${renderRichText(current.options[key])}</span>
                   </button>
                 `;
               })
@@ -413,18 +431,19 @@ function renderResultItem(detail) {
         <span class="answer-badge ${statusClass}">${detail.is_correct ? "To'g'ri" : "Noto'g'ri"}</span>
         <strong>${detail.position}-savol</strong>
       </div>
-      <div class="review-question">${escapeHtml(detail.text)}</div>
+      ${renderQuestionImage(detail.image_data, "review-image")}
+      ${detail.text ? `<div class="review-question">${renderRichText(detail.text)}</div>` : ""}
       <div class="answer-pair">
         <div>
           <span>Sizning javobingiz</span>
-          <strong>${escapeHtml(selectedLabel)}</strong>
+          <strong>${renderRichText(selectedLabel)}</strong>
         </div>
         <div>
           <span>To'g'ri javob</span>
-          <strong>${escapeHtml(correctLabel)}</strong>
+          <strong>${renderRichText(correctLabel)}</strong>
         </div>
       </div>
-      ${detail.explanation ? `<p class="explanation">${escapeHtml(detail.explanation)}</p>` : ""}
+      ${detail.explanation ? `<p class="explanation">${renderRichText(detail.explanation)}</p>` : ""}
     </article>
   `;
 }
@@ -565,12 +584,69 @@ const formulaTemplates = [
   },
 ];
 
+const answerFormulaTemplates = {
+  fraction: {
+    label: "Kasr",
+    title: "Kasr qo'shish",
+    fields: [
+      ["top", "Usti", "2x+3"],
+      ["bottom", "Osti", "x-1"],
+    ],
+    build: (v) => `\\frac{${v.top}}{${v.bottom}}`,
+  },
+  sqrt: {
+    label: "Ildiz",
+    title: "Ildiz qo'shish",
+    fields: [["inside", "Ildiz ichi", "x+4"]],
+    build: (v) => `\\sqrt{${v.inside}}`,
+  },
+  power: {
+    label: "Daraja",
+    title: "Daraja qo'shish",
+    fields: [
+      ["base", "Asos", "x"],
+      ["degree", "Daraja", "2"],
+    ],
+    build: (v) => `${v.base}^{${v.degree}}`,
+  },
+  log: {
+    label: "Log",
+    title: "Log qo'shish",
+    fields: [
+      ["base", "Asos", "2"],
+      ["inside", "Ichidagi ifoda", "x+1"],
+    ],
+    build: (v) => `\\log_{${v.base}}\\left(${v.inside}\\right)`,
+  },
+  trig: {
+    label: "Sin/Cos",
+    title: "Trigonometria qo'shish",
+    fields: [
+      ["fn", "Funksiya", "sin"],
+      ["angle", "Ifoda", "x"],
+    ],
+    build: (v) => `\\${normalizeTrigName(v.fn)}\\left(${v.angle}\\right)`,
+  },
+};
+
 function normalizeTrigName(value) {
   const name = String(value || "sin").trim().toLowerCase();
   if (name === "tg" || name === "tan") return "tan";
   if (name === "ctg" || name === "cot") return "cot";
   if (name === "cos") return "cos";
   return "sin";
+}
+
+function renderAnswerFormulaPalette() {
+  return Object.entries(answerFormulaTemplates)
+    .map(
+      ([id, item]) => `
+        <button class="formula-chip" type="button" draggable="true" data-answer-formula="${id}">
+          ${escapeHtml(item.label)}
+        </button>
+      `,
+    )
+    .join("");
 }
 
 function renderFormulaTools() {
@@ -642,15 +718,18 @@ function buildQuestionText() {
 function updateQuestionPreview() {
   const preview = document.getElementById("questionPreview");
   if (!preview) return;
-  const text = buildQuestionText() || "Savol ko'rinishi shu yerda chiqadi.";
+  const imageData = document.getElementById("questionImageData")?.value || "";
+  const builtText = buildQuestionText();
+  const text = builtText || (imageData ? "" : "Savol ko'rinishi shu yerda chiqadi.");
   const options = ["A", "B", "C", "D"]
     .map((key) => {
       const value = document.querySelector(`[name="option_${key.toLowerCase()}"]`)?.value.trim() || "...";
-      return `<div><strong>${key}</strong><span>${escapeHtml(value)}</span></div>`;
+      return `<div><strong>${key}</strong><span>${renderRichText(value)}</span></div>`;
     })
     .join("");
   preview.innerHTML = `
-    <div class="preview-question">${escapeHtml(text)}</div>
+    ${renderQuestionImage(imageData, "preview-image")}
+    ${text ? `<div class="preview-question">${renderRichText(text)}</div>` : ""}
     <div class="preview-options">${options}</div>
   `;
   typeset();
@@ -678,6 +757,240 @@ function bindFormulaBuilder() {
     field.addEventListener("change", updateQuestionPreview);
   });
   syncPanels();
+}
+
+function canvasPointer(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(canvas.width, (event.clientX - rect.left) * (canvas.width / rect.width))),
+    y: Math.max(0, Math.min(canvas.height, (event.clientY - rect.top) * (canvas.height / rect.height))),
+  };
+}
+
+function normalizeSelection(selection) {
+  const x = Math.min(selection.x, selection.x + selection.w);
+  const y = Math.min(selection.y, selection.y + selection.h);
+  return {
+    x,
+    y,
+    w: Math.abs(selection.w),
+    h: Math.abs(selection.h),
+  };
+}
+
+function drawCropCanvas() {
+  const canvas = document.getElementById("imageCropCanvas");
+  if (!canvas || !imageCropState.image) return;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(imageCropState.image, 0, 0, canvas.width, canvas.height);
+  const selected = imageCropState.selection ? normalizeSelection(imageCropState.selection) : null;
+  if (!selected || selected.w < 4 || selected.h < 4) return;
+  ctx.save();
+  ctx.fillStyle = "rgba(15, 23, 42, 0.45)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.clearRect(selected.x, selected.y, selected.w, selected.h);
+  ctx.strokeStyle = "#159061";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(selected.x, selected.y, selected.w, selected.h);
+  ctx.restore();
+}
+
+function setQuestionImageData(dataUrl) {
+  const hidden = document.getElementById("questionImageData");
+  const preview = document.getElementById("croppedImagePreview");
+  if (hidden) hidden.value = dataUrl || "";
+  if (preview) {
+    preview.innerHTML = dataUrl
+      ? `<img src="${escapeHtml(dataUrl)}" alt="Qirqilgan test rasmi" /><button class="btn secondary" type="button" id="clearQuestionImage">Rasmni olib tashlash</button>`
+      : "";
+  }
+  const clearButton = document.getElementById("clearQuestionImage");
+  if (clearButton) {
+    clearButton.addEventListener("click", () => {
+      imageCropState.croppedData = "";
+      setQuestionImageData("");
+    });
+  }
+  updateQuestionPreview();
+}
+
+function cropSelectedImage() {
+  const canvas = document.getElementById("imageCropCanvas");
+  if (!canvas || !imageCropState.image || !imageCropState.selection) return;
+  const selected = normalizeSelection(imageCropState.selection);
+  if (selected.w < 20 || selected.h < 20) {
+    adminState.error = "Rasmda test joyini sichqoncha bilan belgilang.";
+    renderAdmin();
+    return;
+  }
+  const sourceScaleX = imageCropState.image.naturalWidth / canvas.width;
+  const sourceScaleY = imageCropState.image.naturalHeight / canvas.height;
+  const sourceX = Math.round(selected.x * sourceScaleX);
+  const sourceY = Math.round(selected.y * sourceScaleY);
+  const sourceW = Math.round(selected.w * sourceScaleX);
+  const sourceH = Math.round(selected.h * sourceScaleY);
+  const outputW = Math.min(1100, sourceW);
+  const outputH = Math.round((sourceH / sourceW) * outputW);
+  const output = document.createElement("canvas");
+  output.width = outputW;
+  output.height = outputH;
+  output.getContext("2d").drawImage(imageCropState.image, sourceX, sourceY, sourceW, sourceH, 0, 0, outputW, outputH);
+  imageCropState.croppedData = output.toDataURL("image/jpeg", 0.86);
+  setQuestionImageData(imageCropState.croppedData);
+}
+
+function bindImageCropper() {
+  const input = document.getElementById("questionImageInput");
+  const canvas = document.getElementById("imageCropCanvas");
+  const cropButton = document.getElementById("cropQuestionImage");
+  if (!input || !canvas || !cropButton) return;
+
+  input.addEventListener("change", () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      adminState.error = "Faqat rasm fayl yuklang.";
+      renderAdmin();
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const image = new Image();
+      image.onload = () => {
+        const maxWidth = 880;
+        const scale = Math.min(1, maxWidth / image.naturalWidth);
+        canvas.width = Math.round(image.naturalWidth * scale);
+        canvas.height = Math.round(image.naturalHeight * scale);
+        imageCropState.image = image;
+        imageCropState.selection = {
+          x: canvas.width * 0.08,
+          y: canvas.height * 0.08,
+          w: canvas.width * 0.84,
+          h: canvas.height * 0.84,
+        };
+        canvas.closest(".cropper-wrap")?.classList.add("active");
+        drawCropCanvas();
+      };
+      image.src = String(reader.result || "");
+    };
+    reader.readAsDataURL(file);
+  });
+
+  canvas.addEventListener("pointerdown", (event) => {
+    if (!imageCropState.image) return;
+    const point = canvasPointer(event, canvas);
+    imageCropState.dragging = true;
+    imageCropState.startX = point.x;
+    imageCropState.startY = point.y;
+    imageCropState.selection = { x: point.x, y: point.y, w: 1, h: 1 };
+    canvas.setPointerCapture(event.pointerId);
+    drawCropCanvas();
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!imageCropState.dragging) return;
+    const point = canvasPointer(event, canvas);
+    imageCropState.selection = {
+      x: imageCropState.startX,
+      y: imageCropState.startY,
+      w: point.x - imageCropState.startX,
+      h: point.y - imageCropState.startY,
+    };
+    drawCropCanvas();
+  });
+  canvas.addEventListener("pointerup", (event) => {
+    if (!imageCropState.dragging) return;
+    imageCropState.dragging = false;
+    canvas.releasePointerCapture(event.pointerId);
+    drawCropCanvas();
+  });
+  cropButton.addEventListener("click", cropSelectedImage);
+}
+
+function insertAtCursor(field, value) {
+  const start = field.selectionStart ?? field.value.length;
+  const end = field.selectionEnd ?? field.value.length;
+  field.value = `${field.value.slice(0, start)}${value}${field.value.slice(end)}`;
+  const cursor = start + value.length;
+  field.focus();
+  field.setSelectionRange?.(cursor, cursor);
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function openFormulaComposer(type, target) {
+  const template = answerFormulaTemplates[type];
+  const panel = document.getElementById("formulaComposer");
+  if (!template || !target || !panel) return;
+  panel.hidden = false;
+  panel.dataset.targetName = target.name || target.id || "";
+  panel.dataset.formulaType = type;
+  panel.innerHTML = `
+    <div class="formula-compose-head">
+      <strong>${escapeHtml(template.title)}</strong>
+      <span>${escapeHtml(target.dataset.fieldLabel || "maydon")} uchun</span>
+    </div>
+    <div class="formula-input-grid">
+      ${template.fields
+        .map(
+          ([key, label, placeholder]) => `
+            <div class="field">
+              <label>${escapeHtml(label)}</label>
+              <input data-compose-field="${key}" placeholder="${escapeHtml(placeholder)}" />
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+    <div class="button-row">
+      <button class="btn success" type="button" id="insertFormulaButton">Qo'shish</button>
+      <button class="btn secondary" type="button" id="closeFormulaComposer">Yopish</button>
+    </div>
+  `;
+  panel.querySelector("[data-compose-field]")?.focus();
+  panel.querySelector("#closeFormulaComposer").addEventListener("click", () => {
+    panel.hidden = true;
+    panel.innerHTML = "";
+  });
+  panel.querySelector("#insertFormulaButton").addEventListener("click", () => {
+    const values = Object.fromEntries(
+      template.fields.map(([key]) => [key, panel.querySelector(`[data-compose-field="${key}"]`)?.value.trim() || ""]),
+    );
+    const complete = template.fields.every(([key]) => values[key]);
+    if (!complete) return;
+    insertAtCursor(target, `\\(${template.build(values)}\\)`);
+    panel.hidden = true;
+    panel.innerHTML = "";
+  });
+}
+
+function bindAnswerFormulaPalette() {
+  const buttons = [...document.querySelectorAll("[data-answer-formula]")];
+  const fields = [...document.querySelectorAll("[data-formula-drop-target]")];
+  if (!buttons.length || !fields.length) return;
+  let activeField = fields[0];
+  fields.forEach((field) => {
+    field.addEventListener("focus", () => {
+      activeField = field;
+    });
+    field.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      field.classList.add("drop-ready");
+    });
+    field.addEventListener("dragleave", () => field.classList.remove("drop-ready"));
+    field.addEventListener("drop", (event) => {
+      event.preventDefault();
+      field.classList.remove("drop-ready");
+      activeField = field;
+      const type = event.dataTransfer.getData("text/plain");
+      openFormulaComposer(type, field);
+    });
+  });
+  buttons.forEach((button) => {
+    button.addEventListener("dragstart", (event) => {
+      event.dataTransfer.setData("text/plain", button.dataset.answerFormula);
+    });
+    button.addEventListener("click", () => openFormulaComposer(button.dataset.answerFormula, activeField));
+  });
 }
 
 function renderAdminAccessPanel() {
@@ -840,18 +1153,44 @@ function renderAdmin() {
                   </div>
                   <div class="field">
                     <label>Savol matni</label>
-                    <textarea id="questionIntro" name="question_intro" required placeholder="Tenglamani yeching."></textarea>
+                    <textarea id="questionIntro" name="question_intro" placeholder="Tenglamani yeching. Rasmli savolda bo'sh qoldirish mumkin."></textarea>
                   </div>
                   <div class="formula-builder">
                     <label>Formula qo'shish</label>
                     <div class="formula-toolbar">${renderFormulaTools()}</div>
                     ${renderFormulaFields()}
                   </div>
+                  <div class="image-question-builder">
+                    <div class="form-title compact-title">
+                      <div>
+                        <h2>Rasmli savol</h2>
+                        <p class="muted">Rasm yuklang, test turgan joyni belgilang va qirqib oling.</p>
+                      </div>
+                    </div>
+                    <input type="hidden" id="questionImageData" name="image_data" />
+                    <div class="field">
+                      <label>Rasm yuklash</label>
+                      <input id="questionImageInput" type="file" accept="image/*" />
+                    </div>
+                    <div class="cropper-wrap">
+                      <canvas id="imageCropCanvas"></canvas>
+                      <div class="button-row">
+                        <button class="btn secondary" type="button" id="cropQuestionImage">Belgilangan joyni qirqish</button>
+                      </div>
+                    </div>
+                    <div class="cropped-preview" id="croppedImagePreview"></div>
+                  </div>
+                  <div class="answer-composer">
+                    <label>Javoblarga formula qo'shish</label>
+                    <div class="formula-palette">${renderAnswerFormulaPalette()}</div>
+                    <p class="muted">Belgini A/B/C/D maydoniga torting yoki javob maydonini bosib, belgini tanlang.</p>
+                    <div class="formula-compose-panel" id="formulaComposer" hidden></div>
+                  </div>
                   <div class="answer-grid">
-                    <div class="field"><label>A variant</label><input name="option_a" required placeholder="4" /></div>
-                    <div class="field"><label>B variant</label><input name="option_b" required placeholder="5" /></div>
-                    <div class="field"><label>C variant</label><input name="option_c" required placeholder="8/3" /></div>
-                    <div class="field"><label>D variant</label><input name="option_d" required placeholder="-1" /></div>
+                    <div class="field"><label>A variant</label><input name="option_a" required placeholder="4" data-field-label="A variant" data-formula-drop-target /></div>
+                    <div class="field"><label>B variant</label><input name="option_b" required placeholder="5" data-field-label="B variant" data-formula-drop-target /></div>
+                    <div class="field"><label>C variant</label><input name="option_c" required placeholder="8/3" data-field-label="C variant" data-formula-drop-target /></div>
+                    <div class="field"><label>D variant</label><input name="option_d" required placeholder="-1" data-field-label="D variant" data-formula-drop-target /></div>
                   </div>
                   <div class="split">
                     <div class="field">
@@ -860,7 +1199,7 @@ function renderAdmin() {
                     </div>
                     <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
                   </div>
-                  <div class="field"><label>Izoh</label><textarea name="explanation" placeholder="Tenglamani yechganda x=8/3 chiqadi."></textarea></div>
+                  <div class="field"><label>Izoh</label><textarea name="explanation" placeholder="Tenglamani yechganda x=8/3 chiqadi." data-field-label="Izoh" data-formula-drop-target></textarea></div>
                   <div class="question-preview" id="questionPreview"></div>
                   ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
                   <button class="btn success" ${hasLessons ? "" : "disabled"}>Savolni saqlash</button>
@@ -1056,12 +1395,18 @@ function bindAdminEvents() {
       throw new Error("Formula uchun ochilgan maydonlarni to'liq to'ldiring.");
     }
     data.text = buildQuestionText();
+    data.image_data = document.getElementById("questionImageData")?.value || "";
+    if (!data.text && !data.image_data) {
+      throw new Error("Savol matni yozing yoki rasm yuklab qirqib oling.");
+    }
     delete data.question_intro;
     await apiPost("/api/admin/questions", data, true);
     adminState.message = "Savol qo'shildi.";
     await loadAdminData();
   });
   bindFormulaBuilder();
+  bindImageCropper();
+  bindAnswerFormulaPalette();
 }
 
 function bindForm(id, handler) {

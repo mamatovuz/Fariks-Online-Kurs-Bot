@@ -298,6 +298,17 @@ h3 {
   color: var(--ink);
 }
 
+.question-image {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  margin: 0 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .options {
   display: grid;
   gap: 12px;
@@ -761,6 +772,118 @@ h3 {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--text);
+  font-weight: 700;
+}
+
+.image-question-builder,
+.answer-composer {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.compact-title h2 {
+  font-size: 17px;
+  margin: 0 0 4px;
+}
+
+.cropper-wrap {
+  display: none;
+  gap: 10px;
+}
+
+.cropper-wrap.active {
+  display: grid;
+}
+
+#imageCropCanvas {
+  width: 100%;
+  max-height: 520px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.cropped-preview {
+  display: grid;
+  gap: 10px;
+}
+
+.cropped-preview img,
+.preview-image,
+.review-image {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.cropped-preview img,
+.preview-image {
+  max-height: 260px;
+  object-fit: contain;
+}
+
+.review-image {
+  max-height: 320px;
+  object-fit: contain;
+  margin-bottom: 12px;
+}
+
+.formula-palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.formula-chip {
+  min-height: 38px;
+  border: 1px solid #b9c6d8;
+  border-radius: 8px;
+  padding: 8px 11px;
+  background: #f8fafc;
+  color: var(--ink);
+  font-weight: 800;
+  cursor: grab;
+}
+
+.formula-chip:active {
+  cursor: grabbing;
+}
+
+.drop-ready {
+  border-color: var(--green) !important;
+  box-shadow: 0 0 0 3px rgba(21, 144, 97, 0.14);
+}
+
+.formula-compose-panel {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #a8dabc;
+  border-radius: 8px;
+  background: #effaf4;
+}
+
+.formula-compose-panel[hidden] {
+  display: none;
+}
+
+.formula-compose-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink);
+}
+
+.formula-compose-head span {
+  color: var(--muted);
   font-weight: 700;
 }
 
