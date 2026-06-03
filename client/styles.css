@@ -233,6 +233,13 @@ h3 {
   background: var(--red);
 }
 
+.btn.small-btn {
+  min-height: 34px;
+  padding: 0 11px;
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+
 .btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -943,9 +950,25 @@ tr:last-child td {
 
 .course-title {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   font-weight: 800;
+}
+
+.course-title div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.course-title span {
+  overflow-wrap: anywhere;
+}
+
+.course-title small {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .module-list,
@@ -953,6 +976,50 @@ tr:last-child td {
   margin: 10px 0 0;
   padding-left: 18px;
   color: var(--muted);
+}
+
+.question-admin {
+  display: grid;
+  gap: 14px;
+}
+
+.question-admin-list {
+  display: grid;
+  gap: 10px;
+}
+
+.question-admin-item {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.question-admin-item p {
+  margin: 4px 0;
+  color: var(--ink);
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.question-admin-item span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.admin-question-thumb {
+  width: 96px;
+  max-height: 72px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
 }
 
 .message {
@@ -988,6 +1055,20 @@ tr:last-child td {
 
   .formula-input-grid {
     grid-template-columns: 1fr;
+  }
+
+  .question-admin-item {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .question-admin-item .btn {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .admin-question-thumb {
+    width: 72px;
+    max-height: 64px;
   }
 }
 
@@ -1034,6 +1115,10 @@ tr:last-child td {
 
   .btn {
     flex: 1;
+  }
+
+  .btn.small-btn {
+    width: 100%;
   }
 
   .stats-grid,

@@ -1861,6 +1861,15 @@ class MongoDatabase:
             course["modules"] = modules_by_course.get(course["id"], [])
         return courses
 
+    def admin_questions(self, lesson_id: int | None = None) -> list[dict]:
+        query = {"lesson_id": int(lesson_id)} if lesson_id else {}
+        rows = self._clean_list(self.questions.find(query).sort([("lesson_id", 1), ("position", 1), ("id", 1)]).limit(200))
+        for row in rows:
+            lesson = self.get_lesson(row["lesson_id"]) or {}
+            row["lesson_title"] = lesson.get("title", "")
+            row["course_title"] = lesson.get("course_title", "")
+        return rows
+
     def admin_students(self) -> list[dict]:
         students = self._clean_list(self.users.find().sort("registered_at", -1))
         for student in students:
@@ -1993,6 +2002,35 @@ class MongoDatabase:
         }
         self.questions.insert_one(doc)
         return self._clean(doc)
+
+    def admin_delete_question(self, question_id: int) -> dict:
+        question = self._clean(self.questions.find_one({"id": int(question_id)}))
+        if not question:
+            raise ValueError("Savol topilmadi")
+        self.questions.delete_one({"id": int(question_id)})
+        return {"deleted": True, "question_id": int(question_id), "lesson_id": question["lesson_id"]}
+
+    def admin_delete_course(self, course_id: int) -> dict:
+        course_id = int(course_id)
+        course = self.get_course(course_id)
+        if not course:
+            raise ValueError("Kurs topilmadi")
+        modules = self._clean_list(self.modules.find({"course_id": course_id}, {"id": 1}))
+        module_ids = [module["id"] for module in modules]
+        lessons = self._clean_list(self.lessons.find({"module_id": {"$in": module_ids}}, {"id": 1})) if module_ids else []
+        lesson_ids = [lesson["id"] for lesson in lessons]
+        deleted = {
+            "questions": self.questions.delete_many({"lesson_id": {"$in": lesson_ids}}).deleted_count if lesson_ids else 0,
+            "results": self.results.delete_many({"lesson_id": {"$in": lesson_ids}}).deleted_count if lesson_ids else 0,
+            "progress": self.progress.delete_many({"lesson_id": {"$in": lesson_ids}}).deleted_count if lesson_ids else 0,
+            "test_tokens": self.test_tokens.delete_many({"lesson_id": {"$in": lesson_ids}}).deleted_count if lesson_ids else 0,
+            "lessons": self.lessons.delete_many({"module_id": {"$in": module_ids}}).deleted_count if module_ids else 0,
+            "modules": self.modules.delete_many({"course_id": course_id}).deleted_count,
+            "enrollments": self.enrollments.delete_many({"course_id": course_id}).deleted_count,
+            "payments": self.payments.delete_many({"course_id": course_id}).deleted_count,
+            "courses": self.courses.delete_one({"id": course_id}).deleted_count,
+        }
+        return {"deleted": True, "course_id": course_id, "title": course["title"], "counts": deleted}
 
 
 Database = MongoDatabase
@@ -2704,12 +2742,6 @@ class FariksBot:
                 self.telegram.send_message(chat_id, "Faqat A, B, C yoki D yozing.")
                 return
             payload["correct_option"] = correct
-            self.db.set_state(user_id, "admin_question_explanation", payload)
-            self.telegram.send_message(chat_id, "Izoh yozing. Kerak bo'lmasa - yuboring.")
-            return
-
-        if state == "admin_question_explanation":
-            payload["explanation"] = "" if text == "-" else text
             self.finish_admin_question(chat_id, user_id, payload)
             return
 
@@ -2931,6 +2963,26 @@ def make_handler(db: Database, telegram: TelegramClient):
                 print(f"HTTP POST error: {error}")
                 self.send_json({"ok": False, "error": "Server xatosi"}, status=500)
 
+        def do_DELETE(self) -> None:
+            try:
+                parsed = urllib.parse.urlparse(self.path)
+                path = parsed.path
+                query = urllib.parse.parse_qs(parsed.query)
+
+                if path.startswith("/api/admin/"):
+                    if not self.is_admin(query):
+                        self.send_json({"ok": False, "error": "Admin token noto'g'ri"}, status=401)
+                        return
+                    self.handle_admin_delete(path)
+                    return
+
+                self.send_json({"ok": False, "error": "Endpoint topilmadi"}, status=404)
+            except ValueError as error:
+                self.send_json({"ok": False, "error": str(error)}, status=400)
+            except Exception as error:
+                print(f"HTTP DELETE error: {error}")
+                self.send_json({"ok": False, "error": "Server xatosi"}, status=500)
+
         def read_json(self) -> dict:
             length = int(self.headers.get("Content-Length", "0") or 0)
             raw = self.rfile.read(length) if length else b"{}"
@@ -2939,7 +2991,7 @@ def make_handler(db: Database, telegram: TelegramClient):
         def send_cors_headers(self) -> None:
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Admin-Token")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 
         def send_json(self, payload: dict, status: int = 200) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -3002,6 +3054,10 @@ def make_handler(db: Database, telegram: TelegramClient):
                 self.send_json({"ok": True, "data": db.admin_summary()})
             elif path == "/api/admin/courses":
                 self.send_json({"ok": True, "data": db.admin_courses()})
+            elif path == "/api/admin/questions":
+                lesson_id_raw = query.get("lesson_id", [""])[0]
+                lesson_id = int(lesson_id_raw) if lesson_id_raw else None
+                self.send_json({"ok": True, "data": db.admin_questions(lesson_id)})
             elif path == "/api/admin/students":
                 self.send_json({"ok": True, "data": db.admin_students()})
             elif path == "/api/admin/payments":
@@ -3022,6 +3078,15 @@ def make_handler(db: Database, telegram: TelegramClient):
                 self.send_json({"ok": True, "data": db.admin_update_lesson_video(body.get("lesson_id"), body.get("video_url"))})
             elif path == "/api/admin/questions":
                 self.send_json({"ok": True, "data": db.admin_create_question(body)}, status=201)
+            else:
+                self.send_json({"ok": False, "error": "Admin endpoint topilmadi"}, status=404)
+
+        def handle_admin_delete(self, path: str) -> None:
+            parts = path.strip("/").split("/")
+            if len(parts) == 4 and parts[:3] == ["api", "admin", "courses"]:
+                self.send_json({"ok": True, "data": db.admin_delete_course(int(parts[3]))})
+            elif len(parts) == 4 and parts[:3] == ["api", "admin", "questions"]:
+                self.send_json({"ok": True, "data": db.admin_delete_question(int(parts[3]))})
             else:
                 self.send_json({"ok": False, "error": "Admin endpoint topilmadi"}, status=404)
 

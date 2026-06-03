@@ -35,6 +35,8 @@ const adminState = {
   me: null,
   summary: null,
   courses: [],
+  questions: [],
+  selectedLessonId: "",
   students: [],
   payments: [],
   results: [],
@@ -92,6 +94,12 @@ async function apiPost(path, body, admin = false) {
     headers,
     body: JSON.stringify(body),
   });
+  return parseApiResponse(response);
+}
+
+async function apiDelete(path, admin = false) {
+  const headers = admin ? { "X-Admin-Token": adminState.token } : {};
+  const response = await fetch(`${API_BASE}${path}`, { method: "DELETE", headers });
   return parseApiResponse(response);
 }
 
@@ -474,6 +482,18 @@ async function loadAdminData() {
     adminState.error = error.message;
     adminState.loading = false;
   }
+  renderAdmin();
+}
+
+async function loadLessonQuestions(lessonId) {
+  if (!lessonId) {
+    adminState.questions = [];
+    adminState.selectedLessonId = "";
+    renderAdmin();
+    return;
+  }
+  adminState.selectedLessonId = String(lessonId);
+  adminState.questions = await apiGet(`/api/admin/questions?lesson_id=${encodeURIComponent(lessonId)}`, true);
   renderAdmin();
 }
 
@@ -1141,7 +1161,7 @@ function renderAdmin() {
                   <span class="step-badge">4</span>
                   <div>
                     <h2>Test savoli qo'shish</h2>
-                    <p class="muted">Formula kodi kerak emas: tugmani tanlab, bo'sh joylarni to'ldiring.</p>
+                    <p class="muted">Asosiy usul: rasm yuklang, test joyini qirqing, javoblarni kiriting.</p>
                   </div>
                 </div>
                 <form class="form-grid" id="questionForm">
@@ -1154,11 +1174,6 @@ function renderAdmin() {
                   <div class="field">
                     <label>Savol matni</label>
                     <textarea id="questionIntro" name="question_intro" placeholder="Tenglamani yeching. Rasmli savolda bo'sh qoldirish mumkin."></textarea>
-                  </div>
-                  <div class="formula-builder">
-                    <label>Formula qo'shish</label>
-                    <div class="formula-toolbar">${renderFormulaTools()}</div>
-                    ${renderFormulaFields()}
                   </div>
                   <div class="image-question-builder">
                     <div class="form-title compact-title">
@@ -1181,7 +1196,7 @@ function renderAdmin() {
                     <div class="cropped-preview" id="croppedImagePreview"></div>
                   </div>
                   <div class="answer-composer">
-                    <label>Javoblarga formula qo'shish</label>
+                    <label>Javobni kasr yoki ildiz bilan yozish</label>
                     <div class="formula-palette">${renderAnswerFormulaPalette()}</div>
                     <p class="muted">Belgini A/B/C/D maydoniga torting yoki javob maydonini bosib, belgini tanlang.</p>
                     <div class="formula-compose-panel" id="formulaComposer" hidden></div>
@@ -1199,7 +1214,6 @@ function renderAdmin() {
                     </div>
                     <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
                   </div>
-                  <div class="field"><label>Izoh</label><textarea name="explanation" placeholder="Tenglamani yechganda x=8/3 chiqadi." data-field-label="Izoh" data-formula-drop-target></textarea></div>
                   <div class="question-preview" id="questionPreview"></div>
                   ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
                   <button class="btn success" ${hasLessons ? "" : "disabled"}>Savolni saqlash</button>
@@ -1211,6 +1225,11 @@ function renderAdmin() {
                 <div class="course-tree">
                   ${adminState.courses.map(renderCourseTree).join("")}
                 </div>
+              </section>
+
+              <section class="panel pad">
+                <h2>Savollarni boshqarish</h2>
+                ${renderQuestionManager(lessons)}
               </section>
 
               <section class="panel pad">
@@ -1245,8 +1264,11 @@ function renderCourseTree(course) {
   return `
     <div class="course-item">
       <div class="course-title">
-        <span>${escapeHtml(course.title)}</span>
-        <span>${money(course.price)}</span>
+        <div>
+          <span>${escapeHtml(course.title)}</span>
+          <small>${money(course.price)}</small>
+        </div>
+        <button class="btn danger small-btn" type="button" data-delete-course="${course.id}">O'chirish</button>
       </div>
       <ul class="module-list">
         ${course.modules
@@ -1266,6 +1288,58 @@ function renderCourseTree(course) {
       </ul>
     </div>
   `;
+}
+
+function renderQuestionManager(lessons) {
+  if (!lessons.length) return `<p class="muted">Avval dars yarating.</p>`;
+  return `
+    <div class="question-admin">
+      <div class="field">
+        <label>Dars tanlash</label>
+        <select id="questionLessonSelect">
+          <option value="">Darsni tanlang</option>
+          ${lessons
+            .map(
+              (lesson) => `
+                <option value="${lesson.id}" ${String(lesson.id) === String(adminState.selectedLessonId) ? "selected" : ""}>
+                  ${escapeHtml(lesson.course_title)} / ${escapeHtml(lesson.title)}
+                </option>
+              `,
+            )
+            .join("")}
+        </select>
+      </div>
+      <div class="question-admin-list">
+        ${renderAdminQuestions()}
+      </div>
+    </div>
+  `;
+}
+
+function questionTitle(question) {
+  const text = String(question.text || "").replace(/\s+/g, " ").trim();
+  if (text) return text.slice(0, 120);
+  return question.image_data ? "Rasmli savol" : "Savol matni yo'q";
+}
+
+function renderAdminQuestions() {
+  if (!adminState.selectedLessonId) return `<p class="muted">Savollarni ko'rish uchun darsni tanlang.</p>`;
+  if (!adminState.questions.length) return `<p class="muted">Bu darsda hali savol yo'q.</p>`;
+  return adminState.questions
+    .map(
+      (question) => `
+        <article class="question-admin-item">
+          ${renderQuestionImage(question.image_data, "admin-question-thumb")}
+          <div>
+            <strong>${question.position}-savol</strong>
+            <p>${escapeHtml(questionTitle(question))}</p>
+            <span>To'g'ri javob: ${escapeHtml(question.correct_option || "-")}</span>
+          </div>
+          <button class="btn danger small-btn" type="button" data-delete-question="${question.id}">O'chirish</button>
+        </article>
+      `,
+    )
+    .join("");
 }
 
 function renderStudentsTable() {
@@ -1391,9 +1465,6 @@ function bindAdminEvents() {
     await loadAdminData();
   });
   bindForm("questionForm", async (data) => {
-    if (activeFormulaTemplate().id !== "none" && !buildFormulaLatex()) {
-      throw new Error("Formula uchun ochilgan maydonlarni to'liq to'ldiring.");
-    }
     data.text = buildQuestionText();
     data.image_data = document.getElementById("questionImageData")?.value || "";
     if (!data.text && !data.image_data) {
@@ -1402,11 +1473,59 @@ function bindAdminEvents() {
     delete data.question_intro;
     await apiPost("/api/admin/questions", data, true);
     adminState.message = "Savol qo'shildi.";
+    adminState.selectedLessonId = String(data.lesson_id || "");
+    if (adminState.selectedLessonId) {
+      adminState.questions = await apiGet(`/api/admin/questions?lesson_id=${encodeURIComponent(adminState.selectedLessonId)}`, true);
+    }
     await loadAdminData();
   });
-  bindFormulaBuilder();
   bindImageCropper();
   bindAnswerFormulaPalette();
+
+  const questionLessonSelect = document.getElementById("questionLessonSelect");
+  if (questionLessonSelect) {
+    questionLessonSelect.addEventListener("change", async () => {
+      try {
+        await loadLessonQuestions(questionLessonSelect.value);
+      } catch (error) {
+        adminState.error = error.message;
+        renderAdmin();
+      }
+    });
+  }
+
+  document.querySelectorAll("[data-delete-question]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Bu savol o'chirilsinmi?")) return;
+      try {
+        await apiDelete(`/api/admin/questions/${button.dataset.deleteQuestion}`, true);
+        adminState.message = "Savol o'chirildi.";
+        if (adminState.selectedLessonId) {
+          adminState.questions = await apiGet(`/api/admin/questions?lesson_id=${encodeURIComponent(adminState.selectedLessonId)}`, true);
+        }
+        await loadAdminData();
+      } catch (error) {
+        adminState.error = error.message;
+        renderAdmin();
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-delete-course]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Kurs o'chirilsa, uning modullari, darslari va savollari ham o'chadi. Davom etamizmi?")) return;
+      try {
+        await apiDelete(`/api/admin/courses/${button.dataset.deleteCourse}`, true);
+        adminState.message = "Kurs o'chirildi.";
+        adminState.questions = [];
+        adminState.selectedLessonId = "";
+        await loadAdminData();
+      } catch (error) {
+        adminState.error = error.message;
+        renderAdmin();
+      }
+    });
+  });
 }
 
 function bindForm(id, handler) {
