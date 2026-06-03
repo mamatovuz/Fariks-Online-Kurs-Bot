@@ -183,6 +183,36 @@ def format_money(amount: int) -> str:
     return f"{amount:,}".replace(",", " ") + " so'm"
 
 
+def title_number(value: str) -> int | None:
+    match = re.match(r"\s*(\d+)\s*[.):\-]?", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def natural_item_key(item: dict) -> tuple:
+    number = title_number(str(item.get("title", "")))
+    position = int(item.get("position") or 0)
+    fallback = int(item.get("id") or 0)
+    return (
+        0 if number is not None else 1,
+        number if number is not None else (position or fallback),
+        position or fallback,
+        str(item.get("title", "")).lower(),
+        fallback,
+    )
+
+
+def is_youtube_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(str(value or ""))
+    host = parsed.netloc.lower().removeprefix("www.")
+    return host in {"youtube.com", "m.youtube.com", "youtu.be"} or host.endswith(".youtube.com")
+
+
+def is_direct_video_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(str(value or ""))
+    path = parsed.path.lower()
+    return parsed.scheme in {"http", "https"} and path.endswith((".mp4", ".mov", ".m4v", ".webm"))
+
+
 def slugify(value: str) -> str:
     text = value.lower()
     replacements = {
@@ -1494,7 +1524,7 @@ class MongoDatabase:
         return self._clean(self.users.find_one({"_id": telegram_id}))
 
     def list_courses(self) -> list[dict]:
-        return self._clean_list(self.courses.find().sort("id", 1))
+        return sorted(self._clean_list(self.courses.find().sort("id", 1)), key=natural_item_key)
 
     def get_course(self, course_id: int) -> dict | None:
         return self._clean(self.courses.find_one({"id": int(course_id)}))
@@ -1544,7 +1574,10 @@ class MongoDatabase:
         return self._clean(self.modules.find_one({"id": int(module_id)}))
 
     def list_module_lessons(self, module_id: int) -> list[dict]:
-        return self._clean_list(self.lessons.find({"module_id": int(module_id)}).sort([("position", 1), ("id", 1)]))
+        return sorted(
+            self._clean_list(self.lessons.find({"module_id": int(module_id)}).sort([("position", 1), ("id", 1)])),
+            key=natural_item_key,
+        )
 
     def get_lesson(self, lesson_id: int) -> dict | None:
         lesson = self._clean(self.lessons.find_one({"id": int(lesson_id)}))
@@ -1562,10 +1595,16 @@ class MongoDatabase:
         return self.get_lesson(lesson["id"]) if lesson else None
 
     def course_lesson_order(self, course_id: int) -> list[dict]:
-        modules = self._clean_list(self.modules.find({"course_id": int(course_id)}).sort([("position", 1), ("id", 1)]))
+        modules = sorted(
+            self._clean_list(self.modules.find({"course_id": int(course_id)}).sort([("position", 1), ("id", 1)])),
+            key=natural_item_key,
+        )
         ordered = []
         for module in modules:
-            lessons = self._clean_list(self.lessons.find({"module_id": module["id"]}).sort([("position", 1), ("id", 1)]))
+            lessons = sorted(
+                self._clean_list(self.lessons.find({"module_id": module["id"]}).sort([("position", 1), ("id", 1)])),
+                key=natural_item_key,
+            )
             for lesson in lessons:
                 lesson["course_id"] = course_id
                 lesson["module_title"] = module["title"]
@@ -1595,7 +1634,10 @@ class MongoDatabase:
         course = self.get_course(course_id)
         if not course:
             raise ValueError("Kurs topilmadi")
-        modules = self._clean_list(self.modules.find({"course_id": course_id}).sort([("position", 1), ("id", 1)]))
+        modules = sorted(
+            self._clean_list(self.modules.find({"course_id": course_id}).sort([("position", 1), ("id", 1)])),
+            key=natural_item_key,
+        )
         progress_rows = self._clean_list(self.progress.find({"user_id": user_id}))
         progress_map = {row["lesson_id"]: row for row in progress_rows}
         for module in modules:
@@ -1846,8 +1888,8 @@ class MongoDatabase:
 
     def admin_courses(self) -> list[dict]:
         courses = self.list_courses()
-        modules = self._clean_list(self.modules.find().sort([("position", 1), ("id", 1)]))
-        lessons = self._clean_list(self.lessons.find().sort([("position", 1), ("id", 1)]))
+        modules = sorted(self._clean_list(self.modules.find().sort([("position", 1), ("id", 1)])), key=natural_item_key)
+        lessons = sorted(self._clean_list(self.lessons.find().sort([("position", 1), ("id", 1)])), key=natural_item_key)
         counts = {row["_id"]: row["total"] for row in self.questions.aggregate([{"$group": {"_id": "$lesson_id", "total": {"$sum": 1}}}])}
         lessons_by_module: dict[int, list[dict]] = {}
         for lesson in lessons:
@@ -2061,8 +2103,8 @@ class TelegramClient:
             print(f"Telegram request error: {error}")
         return {"ok": False}
 
-    def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None) -> None:
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    def send_message(self, chat_id: int, text: str, reply_markup: dict | None = None, disable_preview: bool = True) -> None:
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": disable_preview}
         if reply_markup:
             payload["reply_markup"] = reply_markup
         self.request("sendMessage", payload)
@@ -2146,30 +2188,30 @@ class FariksBot:
         return {
             "inline_keyboard": [
                 [
-                    {"text": "Statistika", "callback_data": "admin:stats"},
-                    {"text": "Kurslar", "callback_data": "admin:courses"},
+                    {"text": "📊 Statistika", "callback_data": "admin:stats"},
+                    {"text": "📚 Kurslar", "callback_data": "admin:courses"},
                 ],
                 [
-                    {"text": "Yangi kurs", "callback_data": "admin:add_course"},
-                    {"text": "Yangi modul", "callback_data": "admin:add_module"},
+                    {"text": "➕ Yangi kurs", "callback_data": "admin:add_course"},
+                    {"text": "🧩 Yangi modul", "callback_data": "admin:add_module"},
                 ],
                 [
-                    {"text": "Yangi dars", "callback_data": "admin:add_lesson"},
-                    {"text": "Darsga video", "callback_data": "admin:add_video"},
+                    {"text": "🎬 Yangi dars", "callback_data": "admin:add_lesson"},
+                    {"text": "🎥 Darsga video", "callback_data": "admin:add_video"},
                 ],
-                [{"text": "Test savoli qo'shish", "callback_data": "admin:add_question"}],
-                [{"text": "Web admin panel", "url": link}],
+                [{"text": "📝 Test savoli qo'shish", "callback_data": "admin:add_question"}],
+                [{"text": "🌐 Web admin panel", "url": link}],
             ]
         }
 
     def show_admin_panel(self, chat_id: int, user_id: int, from_user: dict) -> None:
         summary = self.db.admin_summary()
         text = (
-            "<b>FARIKS admin panel</b>\n\n"
-            f"Kurslar: {summary['courses']}\n"
-            f"Darslar: {summary['lessons']}\n"
-            f"Savollar: {summary['questions']}\n"
-            f"O'quvchilar: {summary['students']}\n\n"
+            "🛠 <b>FARIKS admin panel</b>\n\n"
+            f"📚 Kurslar: {summary['courses']}\n"
+            f"🎬 Darslar: {summary['lessons']}\n"
+            f"📝 Savollar: {summary['questions']}\n"
+            f"👥 O'quvchilar: {summary['students']}\n\n"
             "Kerakli amalni tanlang."
         )
         self.telegram.send_message(chat_id, text, self.admin_keyboard(user_id, from_user))
@@ -2177,14 +2219,14 @@ class FariksBot:
     def show_admin_stats(self, chat_id: int, user_id: int, from_user: dict) -> None:
         summary = self.db.admin_summary()
         text = (
-            "<b>Statistika</b>\n\n"
-            f"Kurslar: {summary['courses']}\n"
-            f"Modullar: {summary['modules']}\n"
-            f"Darslar: {summary['lessons']}\n"
-            f"Savollar: {summary['questions']}\n"
-            f"O'quvchilar: {summary['students']}\n"
-            f"To'lovlar: {summary['payments']}\n"
-            f"Natijalar: {summary['results']}"
+            "📊 <b>Statistika</b>\n\n"
+            f"📚 Kurslar: {summary['courses']}\n"
+            f"🧩 Modullar: {summary['modules']}\n"
+            f"🎬 Darslar: {summary['lessons']}\n"
+            f"📝 Savollar: {summary['questions']}\n"
+            f"👥 O'quvchilar: {summary['students']}\n"
+            f"💳 To'lovlar: {summary['payments']}\n"
+            f"🏆 Natijalar: {summary['results']}"
         )
         self.telegram.send_message(chat_id, text, self.admin_keyboard(user_id, from_user))
 
@@ -2193,7 +2235,7 @@ class FariksBot:
         if not courses:
             self.telegram.send_message(chat_id, "Hali kurs yo'q.", self.admin_keyboard(user_id, from_user))
             return
-        lines = ["<b>Kurslar</b>\n"]
+        lines = ["📚 <b>Kurslar</b>\n"]
         for course in courses[:20]:
             lessons_count = sum(len(module.get("lessons", [])) for module in course.get("modules", []))
             question_count = sum(
@@ -2202,9 +2244,9 @@ class FariksBot:
                 for lesson in module.get("lessons", [])
             )
             lines.append(
-                f"<b>{html.escape(course['title'])}</b>\n"
-                f"Narxi: {format_money(course['price'])}\n"
-                f"Modul: {len(course.get('modules', []))}, dars: {lessons_count}, savol: {question_count}\n"
+                f"📘 <b>{html.escape(course['title'])}</b>\n"
+                f"💰 Narxi: {format_money(course['price'])}\n"
+                f"🧩 Modul: {len(course.get('modules', []))}, 🎬 dars: {lessons_count}, 📝 savol: {question_count}\n"
             )
         self.telegram.send_message(chat_id, "\n".join(lines), self.admin_keyboard(user_id, from_user))
 
@@ -2828,12 +2870,22 @@ class FariksBot:
             self.telegram.send_message(chat_id, "Bu dars hali ochilmagan.")
             return
         video_line = lesson["video_url"] or "Video dars fayli admin tomonidan qo'shiladi."
-        keyboard = {"inline_keyboard": [[{"text": "Testni boshlash", "callback_data": f"test:{lesson_id}"}]]}
+        keyboard = {"inline_keyboard": [[{"text": "📝 Testni boshlash", "callback_data": f"test:{lesson_id}"}]]}
         title = html.escape(str(lesson["title"]))
-        if str(video_line).startswith("tgfile:"):
-            self.telegram.send_video(chat_id, video_line.replace("tgfile:", "", 1), f"<b>{title}</b>", keyboard)
+        video_ref = str(video_line).strip()
+        if video_ref.startswith("tgfile:"):
+            self.telegram.send_video(chat_id, video_ref.replace("tgfile:", "", 1), f"<b>{title}</b>", keyboard)
             return
-        self.telegram.send_message(chat_id, f"<b>{title}</b>\n\n{html.escape(str(video_line))}", keyboard)
+        if is_direct_video_url(video_ref):
+            self.telegram.send_video(chat_id, video_ref, f"<b>{title}</b>", keyboard)
+            return
+        if is_youtube_url(video_ref):
+            self.telegram.send_message(chat_id, f"🎥 <a href=\"{html.escape(video_ref)}\">{title}</a>", keyboard, disable_preview=False)
+            return
+        if video_ref.startswith(("http://", "https://")):
+            self.telegram.send_message(chat_id, f"🎥 <a href=\"{html.escape(video_ref)}\">{title}</a>", keyboard, disable_preview=False)
+            return
+        self.telegram.send_message(chat_id, f"<b>{title}</b>\n\n{html.escape(video_ref)}", keyboard)
 
     def send_test_link(self, chat_id: int, user_id: int, lesson_id: int) -> None:
         try:

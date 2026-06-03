@@ -72,6 +72,54 @@ function renderQuestionImage(src, className = "question-image") {
   return src ? `<img class="${className}" src="${escapeHtml(src)}" alt="Test rasmi" />` : "";
 }
 
+function cleanNumberedTitle(value) {
+  return String(value || "").replace(/^\s*\d+\s*[.):\-]\s*/, "").trim() || String(value || "");
+}
+
+function youtubeId(value) {
+  try {
+    const url = new URL(String(value || ""));
+    const host = url.hostname.replace(/^www\./, "");
+    if (host === "youtu.be") return url.pathname.split("/").filter(Boolean)[0] || "";
+    if (host.endsWith("youtube.com")) {
+      if (url.searchParams.get("v")) return url.searchParams.get("v");
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (["embed", "shorts", "live"].includes(parts[0])) return parts[1] || "";
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function isDirectVideoUrl(value) {
+  try {
+    return [".mp4", ".mov", ".m4v", ".webm"].some((suffix) => new URL(String(value || "")).pathname.toLowerCase().endsWith(suffix));
+  } catch {
+    return false;
+  }
+}
+
+function renderLessonVideoPreview(videoUrl, title = "") {
+  const value = String(videoUrl || "").trim();
+  if (!value) return `<div class="video-empty">Video qo'shilmagan</div>`;
+  if (value.startsWith("tgfile:")) {
+    return `<div class="video-mini telegram-video"><span>🎥</span><strong>Telegram video</strong></div>`;
+  }
+  const id = youtubeId(value);
+  if (id) {
+    return `
+      <div class="video-mini youtube-video">
+        <iframe src="https://www.youtube.com/embed/${encodeURIComponent(id)}" title="${escapeHtml(title || "Video dars")}" allowfullscreen></iframe>
+      </div>
+    `;
+  }
+  if (isDirectVideoUrl(value)) {
+    return `<video class="video-mini native-video" src="${escapeHtml(value)}" controls></video>`;
+  }
+  return `<a class="video-mini video-link-card" href="${escapeHtml(value)}" target="_blank" rel="noreferrer">🎥 Video dars</a>`;
+}
+
 function typeset() {
   window.requestAnimationFrame(() => {
     if (window.MathJax?.typesetPromise) {
@@ -1058,7 +1106,7 @@ function renderAdmin() {
             <span class="step-badge">1</span>
             <div>
               <h2>Kurs yaratish</h2>
-              <p class="muted">Kurs nomi, narxi va qisqa tavsifi.</p>
+              <p class="muted">Yangi kursni oching, keyin unga modul va dars qo'shing.</p>
             </div>
           </div>
           <form class="form-grid" id="courseForm">
@@ -1100,10 +1148,10 @@ function renderAdmin() {
             ? `<section class="panel pad"><h2>Yuklanmoqda...</h2></section>`
             : `
               <section class="stats-grid">
-                ${statCard("Kurslar", summary.courses)}
-                ${statCard("Darslar", summary.lessons)}
-                ${statCard("O'quvchilar", summary.students)}
-                ${statCard("Natijalar", summary.results)}
+                ${statCard("📚 Kurslar", summary.courses)}
+                ${statCard("🎬 Darslar", summary.lessons)}
+                ${statCard("👥 O'quvchilar", summary.students)}
+                ${statCard("🏆 Natijalar", summary.results)}
               </section>
 
               <section class="panel pad admin-form-card">
@@ -1125,7 +1173,7 @@ function renderAdmin() {
                     <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
                   </div>
                   <div class="field"><label>Dars nomi</label><input name="title" required placeholder="1-Dars: Chiziqli tenglamalar" /></div>
-                  <div class="field"><label>Video URL</label><input name="video_url" placeholder="https://..." /></div>
+                  <div class="field"><label>Video</label><input name="video_url" placeholder="YouTube link yoki bo'sh qoldiring" /></div>
                   <div class="split">
                     <div class="field"><label>Vaqt, daqiqa</label><input name="duration_minutes" type="number" value="30" min="1" /></div>
                     <div class="field"><label>O'tish foizi</label><input name="pass_percent" type="number" value="80" min="1" max="100" /></div>
@@ -1140,7 +1188,7 @@ function renderAdmin() {
                   <span class="step-badge">3A</span>
                   <div>
                     <h2>Dars videosini yangilash</h2>
-                    <p class="muted">Mavjud darsga YouTube, Vimeo yoki boshqa video havola kiriting.</p>
+                    <p class="muted">YouTube link kiriting yoki Telegram botda /admin -> Darsga video orqali video fayl yuboring.</p>
                   </div>
                 </div>
                 <form class="form-grid" id="videoForm">
@@ -1150,7 +1198,7 @@ function renderAdmin() {
                       ${renderLessonOptions(lessons)}
                     </select>
                   </div>
-                  <div class="field"><label>Video URL</label><input name="video_url" required placeholder="https://..." /></div>
+                  <div class="field"><label>Video</label><input name="video_url" required placeholder="https://youtu.be/..." /></div>
                   ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
                   <button class="btn success" ${hasLessons ? "" : "disabled"}>Videoni saqlash</button>
                 </form>
@@ -1260,32 +1308,57 @@ function statCard(label, value) {
   return `<div class="panel pad metric"><span>${escapeHtml(label)}</span><strong>${Number(value || 0)}</strong></div>`;
 }
 
-function renderCourseTree(course) {
+function renderCourseTree(course, courseIndex) {
   return `
     <div class="course-item">
       <div class="course-title">
+        <span class="order-badge">${courseIndex + 1}</span>
         <div>
-          <span>${escapeHtml(course.title)}</span>
+          <span>${escapeHtml(cleanNumberedTitle(course.title))}</span>
           <small>${money(course.price)}</small>
         </div>
         <button class="btn danger small-btn" type="button" data-delete-course="${course.id}">O'chirish</button>
       </div>
-      <ul class="module-list">
-        ${course.modules
-          .map(
-            (module) => `
-              <li>
-                ${escapeHtml(module.title)}
-                <ul class="lesson-list">
-                  ${module.lessons
-                    .map((lesson) => `<li>${escapeHtml(lesson.title)} - ${lesson.question_count} savol</li>`)
-                    .join("")}
-                </ul>
-              </li>
-            `,
-          )
-          .join("")}
-      </ul>
+      <div class="module-list">
+        ${
+          course.modules.length
+            ? course.modules
+                .map(
+                  (module, moduleIndex) => `
+                    <div class="module-card">
+                      <div class="module-title">
+                        <span class="mini-badge">${moduleIndex + 1}</span>
+                        <strong>${escapeHtml(cleanNumberedTitle(module.title))}</strong>
+                      </div>
+                      <div class="lesson-list">
+                        ${
+                          module.lessons.length
+                            ? module.lessons
+                                .map(
+                                  (lesson, lessonIndex) => `
+                                    <div class="lesson-card">
+                                      <div class="lesson-main">
+                                        <span class="mini-badge light">${lessonIndex + 1}</span>
+                                        <div>
+                                          <strong>${escapeHtml(cleanNumberedTitle(lesson.title))}</strong>
+                                          <span>${lesson.question_count} savol</span>
+                                        </div>
+                                      </div>
+                                      ${renderLessonVideoPreview(lesson.video_url, lesson.title)}
+                                    </div>
+                                  `,
+                                )
+                                .join("")
+                            : `<p class="muted">Bu modulda dars yo'q.</p>`
+                        }
+                      </div>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<p class="muted">Bu kursda modul yo'q.</p>`
+        }
+      </div>
     </div>
   `;
 }
