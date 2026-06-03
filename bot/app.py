@@ -1184,10 +1184,13 @@ class MongoDatabase:
     def __init__(self, _path: Path | None = None):
         try:
             from pymongo import ASCENDING, MongoClient, ReturnDocument
+            from pymongo.errors import OperationFailure
         except ImportError as error:
             raise RuntimeError("MongoDB uchun `pymongo[srv]` dependency o'rnatilishi kerak.") from error
 
         self.return_after = ReturnDocument.AFTER
+        self.operation_failure = OperationFailure
+        self.create_indexes = clean_env("MONGODB_CREATE_INDEXES", "1").lower() not in {"0", "false", "no"}
         database_url = clean_env("DATABASE_URL")
         self.uri = (
             clean_env("MONGODB_URI")
@@ -1248,25 +1251,52 @@ class MongoDatabase:
             counter += 1
         return candidate
 
+    def _create_index(self, collection, keys, **kwargs) -> bool:
+        if not self.create_indexes:
+            return False
+        try:
+            collection.create_index(keys, **kwargs)
+            return True
+        except self.operation_failure as error:
+            message = str(error)
+            is_disk_limit = (
+                getattr(error, "code", None) == 14031
+                or "OutOfDiskSpace" in message
+                or "available disk space" in message
+            )
+            if not is_disk_limit:
+                raise
+            self.create_indexes = False
+            print(
+                "MongoDB index yaratish o'tkazib yuborildi: server disk joyi kam. "
+                "Deploy davom etadi, lekin MONGODB_URI uchun Atlas yoki kattaroq storage ishlating."
+            )
+            return False
+
     def init_schema(self) -> None:
-        self.users.create_index([("telegram_id", self.ASCENDING)], unique=True)
-        self.user_states.create_index([("telegram_id", self.ASCENDING)], unique=True)
-        self.courses.create_index([("id", self.ASCENDING)], unique=True)
-        self.courses.create_index([("slug", self.ASCENDING)], unique=True)
-        self.modules.create_index([("id", self.ASCENDING)], unique=True)
-        self.modules.create_index([("course_id", self.ASCENDING), ("position", self.ASCENDING)])
-        self.lessons.create_index([("id", self.ASCENDING)], unique=True)
-        self.lessons.create_index([("slug", self.ASCENDING)], unique=True)
-        self.lessons.create_index([("module_id", self.ASCENDING), ("position", self.ASCENDING)])
-        self.questions.create_index([("id", self.ASCENDING)], unique=True)
-        self.questions.create_index([("lesson_id", self.ASCENDING), ("position", self.ASCENDING)])
-        self.payments.create_index([("id", self.ASCENDING)], unique=True)
-        self.payments.create_index([("user_id", self.ASCENDING), ("created_at", self.ASCENDING)])
-        self.enrollments.create_index([("user_id", self.ASCENDING), ("course_id", self.ASCENDING)], unique=True)
-        self.progress.create_index([("user_id", self.ASCENDING), ("lesson_id", self.ASCENDING)], unique=True)
-        self.test_tokens.create_index([("token", self.ASCENDING)], unique=True)
-        self.results.create_index([("id", self.ASCENDING)], unique=True)
-        self.results.create_index([("user_id", self.ASCENDING), ("created_at", self.ASCENDING)])
+        indexes = [
+            (self.users, [("telegram_id", self.ASCENDING)], {"unique": True}),
+            (self.user_states, [("telegram_id", self.ASCENDING)], {"unique": True}),
+            (self.courses, [("id", self.ASCENDING)], {"unique": True}),
+            (self.courses, [("slug", self.ASCENDING)], {"unique": True}),
+            (self.modules, [("id", self.ASCENDING)], {"unique": True}),
+            (self.modules, [("course_id", self.ASCENDING), ("position", self.ASCENDING)], {}),
+            (self.lessons, [("id", self.ASCENDING)], {"unique": True}),
+            (self.lessons, [("slug", self.ASCENDING)], {"unique": True}),
+            (self.lessons, [("module_id", self.ASCENDING), ("position", self.ASCENDING)], {}),
+            (self.questions, [("id", self.ASCENDING)], {"unique": True}),
+            (self.questions, [("lesson_id", self.ASCENDING), ("position", self.ASCENDING)], {}),
+            (self.payments, [("id", self.ASCENDING)], {"unique": True}),
+            (self.payments, [("user_id", self.ASCENDING), ("created_at", self.ASCENDING)], {}),
+            (self.enrollments, [("user_id", self.ASCENDING), ("course_id", self.ASCENDING)], {"unique": True}),
+            (self.progress, [("user_id", self.ASCENDING), ("lesson_id", self.ASCENDING)], {"unique": True}),
+            (self.test_tokens, [("token", self.ASCENDING)], {"unique": True}),
+            (self.results, [("id", self.ASCENDING)], {"unique": True}),
+            (self.results, [("user_id", self.ASCENDING), ("created_at", self.ASCENDING)], {}),
+        ]
+        for collection, keys, options in indexes:
+            if not self._create_index(collection, keys, **options):
+                break
         for name, collection in [
             ("courses", self.courses),
             ("modules", self.modules),

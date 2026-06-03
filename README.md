@@ -64,6 +64,13 @@ MongoDB kolleksiyalar: `users`, `courses`, `modules`, `lessons`, `questions`,
 `payments`, `enrollments`, `progress`, `results`, `test_tokens`, `user_states`,
 `counters`.
 
+Railway logida `available disk space ... less than required minimum of 524288000`
+chiqsa, bu MongoDB server storage joyi kamligini bildiradi. Eng toza yechim:
+MongoDB Atlas cluster ochib, Railway `MONGODB_URI` qiymatini Atlas connection
+string bilan almashtiring. Vaqtincha deploy yiqilmasligi uchun backend index
+yaratish xatosini o'tkazib yuboradi; kerak bo'lsa `MONGODB_CREATE_INDEXES=0`
+ham qo'yish mumkin.
+
 ## Bot oqimi
 
 Bot quyidagilarni bajaradi:
