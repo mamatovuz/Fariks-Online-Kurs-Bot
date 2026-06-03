@@ -40,6 +40,7 @@ const adminState = {
   students: [],
   payments: [],
   results: [],
+  settings: { payment: {}, admins: [] },
 };
 
 const imageCropState = {
@@ -517,15 +518,16 @@ async function loadAdminData() {
   adminState.error = "";
   renderAdmin();
   try {
-    const [me, summary, courses, students, payments, results] = await Promise.all([
+    const [me, summary, courses, students, payments, results, settings] = await Promise.all([
       apiGet("/api/admin/me", true),
       apiGet("/api/admin/summary", true),
       apiGet("/api/admin/courses", true),
       apiGet("/api/admin/students", true),
       apiGet("/api/admin/payments", true),
       apiGet("/api/admin/results", true),
+      apiGet("/api/admin/settings", true),
     ]);
-    Object.assign(adminState, { me, summary, courses, students, payments, results, loading: false });
+    Object.assign(adminState, { me, summary, courses, students, payments, results, settings, loading: false });
   } catch (error) {
     adminState.error = error.message;
     adminState.loading = false;
@@ -1089,6 +1091,81 @@ function renderAdminAccessPanel() {
   `;
 }
 
+function renderPaymentSettingsPanel() {
+  const payment = adminState.settings?.payment || {};
+  return `
+    <section class="panel pad admin-form-card">
+      <div class="form-title">
+        <span class="step-badge">💳</span>
+        <div>
+          <h2>Karta sozlash</h2>
+          <p class="muted">Bot foydalanuvchiga aynan shu karta ma'lumotlarini yuboradi.</p>
+        </div>
+      </div>
+      <form class="form-grid" id="paymentSettingsForm">
+        <div class="field">
+          <label>Karta raqami</label>
+          <input name="card_number" required placeholder="8600 0000 0000 0000" value="${escapeHtml(payment.card_number || "")}" />
+        </div>
+        <div class="field">
+          <label>Karta egasi</label>
+          <input name="card_holder" required placeholder="FARIKS O'quv Markazi" value="${escapeHtml(payment.card_holder || "")}" />
+        </div>
+        <button class="btn success">Karta ma'lumotlarini saqlash</button>
+      </form>
+    </section>
+  `;
+}
+
+function renderAdminUsersPanel() {
+  const admins = adminState.settings?.admins || [];
+  return `
+    <section class="panel pad admin-form-card">
+      <div class="form-title">
+        <span class="step-badge">👑</span>
+        <div>
+          <h2>Adminlar</h2>
+          <p class="muted">Yangi admin Telegram ID orqali qo'shiladi.</p>
+        </div>
+      </div>
+      <form class="form-grid" id="adminAddForm">
+        <div class="field">
+          <label>Telegram ID</label>
+          <input name="telegram_id" required inputmode="numeric" placeholder="7903688837" />
+        </div>
+        <div class="field">
+          <label>Ism</label>
+          <input name="name" placeholder="Admin ismi" />
+        </div>
+        <button class="btn success">Admin qo'shish</button>
+      </form>
+      <div class="admin-user-list">
+        ${
+          admins.length
+            ? admins
+                .map(
+                  (admin) => `
+                    <div class="admin-user-item">
+                      <div>
+                        <strong>${escapeHtml(admin.name || admin.telegram_id)}</strong>
+                        <span>${escapeHtml(admin.telegram_id)} · ${admin.source === "env" ? "asosiy admin" : "qo'shilgan admin"}</span>
+                      </div>
+                      ${
+                        admin.source === "env"
+                          ? `<span class="status-pill neutral">Himoyalangan</span>`
+                          : `<button class="btn danger small-btn" type="button" data-delete-admin="${admin.telegram_id}">O'chirish</button>`
+                      }
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<p class="muted">Hali adminlar yo'q.</p>`
+        }
+      </div>
+    </section>
+  `;
+}
+
 function renderAdmin() {
   const summary = adminState.summary || {};
   const modules = allModules();
@@ -1100,6 +1177,8 @@ function renderAdmin() {
     <div class="admin-grid">
       <aside class="admin-stack">
         ${renderAdminAccessPanel()}
+        ${renderPaymentSettingsPanel()}
+        ${renderAdminUsersPanel()}
 
         <section class="panel pad admin-form-card">
           <div class="form-title">
@@ -1440,22 +1519,63 @@ function renderStudentsTable() {
   `;
 }
 
+function paymentStatusLabel(status) {
+  return (
+    {
+      awaiting_receipt: "Chek kutilmoqda",
+      pending_review: "Tekshiruvda",
+      confirmed: "Tasdiqlangan",
+      rejected: "Rad etilgan",
+    }[status] || status || "-"
+  );
+}
+
+function paymentStatusClass(status) {
+  if (status === "confirmed") return "success";
+  if (status === "rejected") return "danger";
+  if (status === "pending_review") return "warning";
+  return "neutral";
+}
+
+function renderPaymentReceipt(payment) {
+  if (payment.receipt_text) return escapeHtml(payment.receipt_text);
+  if (payment.receipt_type === "photo") return "Rasmli chek Telegramga yuborilgan";
+  if (payment.receipt_type === "document") return "Fayl chek Telegramga yuborilgan";
+  return "Chek hali yuborilmagan";
+}
+
 function renderPaymentsTable() {
   if (!adminState.payments.length) return `<p class="muted">To'lovlar hali yo'q.</p>`;
   return `
     <div class="table-wrap">
       <table>
-        <thead><tr><th>O'quvchi</th><th>Kurs</th><th>Usul</th><th>Summa</th><th>Status</th></tr></thead>
+        <thead><tr><th>O'quvchi</th><th>Kurs</th><th>Summa</th><th>Status</th><th>Chek</th><th>Amal</th></tr></thead>
         <tbody>
           ${adminState.payments
             .map(
               (payment) => `
                 <tr>
-                  <td>${escapeHtml(payment.full_name)}</td>
-                  <td>${escapeHtml(payment.course_title)}</td>
-                  <td>${escapeHtml(payment.method)}</td>
+                  <td>
+                    <strong>${escapeHtml(payment.full_name || "-")}</strong><br />
+                    <span class="muted">${escapeHtml(payment.phone || "")}</span>
+                  </td>
+                  <td>${escapeHtml(payment.course_title || "-")}</td>
                   <td>${money(payment.amount)}</td>
-                  <td>${escapeHtml(payment.status)}</td>
+                  <td>
+                    <span class="status-pill ${paymentStatusClass(payment.status)}">${escapeHtml(paymentStatusLabel(payment.status))}</span>
+                    ${payment.rejection_reason ? `<small class="reason-text">Sabab: ${escapeHtml(payment.rejection_reason)}</small>` : ""}
+                  </td>
+                  <td>${renderPaymentReceipt(payment)}</td>
+                  <td>
+                    ${
+                      payment.status === "pending_review"
+                        ? `<div class="action-stack">
+                            <button class="btn success small-btn" type="button" data-approve-payment="${payment.id}">Tasdiqlash</button>
+                            <button class="btn danger small-btn" type="button" data-reject-payment="${payment.id}">Rad etish</button>
+                          </div>`
+                        : `<span class="muted">-</span>`
+                    }
+                  </td>
                 </tr>
               `,
             )
@@ -1537,6 +1657,16 @@ function bindAdminEvents() {
     adminState.message = "Dars videosi yangilandi.";
     await loadAdminData();
   });
+  bindForm("paymentSettingsForm", async (data) => {
+    await apiPost("/api/admin/settings/payment", data, true);
+    adminState.message = "Karta ma'lumotlari saqlandi.";
+    await loadAdminData();
+  });
+  bindForm("adminAddForm", async (data) => {
+    await apiPost("/api/admin/admins", data, true);
+    adminState.message = "Admin qo'shildi.";
+    await loadAdminData();
+  });
   bindForm("questionForm", async (data) => {
     data.text = buildQuestionText();
     data.image_data = document.getElementById("questionImageData")?.value || "";
@@ -1592,6 +1722,49 @@ function bindAdminEvents() {
         adminState.message = "Kurs o'chirildi.";
         adminState.questions = [];
         adminState.selectedLessonId = "";
+        await loadAdminData();
+      } catch (error) {
+        adminState.error = error.message;
+        renderAdmin();
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-delete-admin]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Bu admin o'chirilsinmi?")) return;
+      try {
+        await apiDelete(`/api/admin/admins/${button.dataset.deleteAdmin}`, true);
+        adminState.message = "Admin o'chirildi.";
+        await loadAdminData();
+      } catch (error) {
+        adminState.error = error.message;
+        renderAdmin();
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-approve-payment]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("To'lov tasdiqlansinmi?")) return;
+      try {
+        await apiPost("/api/admin/payments/approve", { payment_id: button.dataset.approvePayment }, true);
+        adminState.message = "To'lov tasdiqlandi.";
+        await loadAdminData();
+      } catch (error) {
+        adminState.error = error.message;
+        renderAdmin();
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-reject-payment]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const reason = prompt("Rad etish sababini yozing:");
+      if (!reason) return;
+      try {
+        await apiPost("/api/admin/payments/reject", { payment_id: button.dataset.rejectPayment, reason }, true);
+        adminState.message = "To'lov rad etildi.";
         await loadAdminData();
       } catch (error) {
         adminState.error = error.message;

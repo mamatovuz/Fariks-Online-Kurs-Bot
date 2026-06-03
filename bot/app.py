@@ -96,6 +96,8 @@ PUBLIC_CLIENT_URL = normalize_public_url(clean_env("PUBLIC_CLIENT_URL", DEFAULT_
 PUBLIC_API_URL = normalize_public_url(clean_env("PUBLIC_API_URL", DEFAULT_PUBLIC_CLIENT_URL))
 ADMIN_TOKEN = clean_env("ADMIN_TOKEN", "change-me")
 APP_SECRET = clean_env("APP_SECRET") or ADMIN_TOKEN or BOT_TOKEN or "fariks-lms-dev-secret"
+DEFAULT_PAYMENT_CARD_NUMBER = clean_env("PAYMENT_CARD_NUMBER", "0000 0000 0000 0000")
+DEFAULT_PAYMENT_CARD_HOLDER = clean_env("PAYMENT_CARD_HOLDER", "FARIKS O'quv Markazi")
 ADMIN_TELEGRAM_IDS = {
     int(item)
     for item in re.split(r"[,\s]+", clean_env("ADMIN_TELEGRAM_IDS") or clean_env("ADMIN_TELEGRAM_ID") or ADMIN_TOKEN)
@@ -1247,6 +1249,8 @@ class MongoDatabase:
         self.test_tokens = self.db.test_tokens
         self.results = self.db.results
         self.counters = self.db.counters
+        self.settings = self.db.settings
+        self.admins = self.db.admins
         self.ASCENDING = ASCENDING
 
     def _clean(self, doc: dict | None) -> dict | None:
@@ -1324,6 +1328,7 @@ class MongoDatabase:
             (self.test_tokens, [("token", self.ASCENDING)], {"unique": True}),
             (self.results, [("id", self.ASCENDING)], {"unique": True}),
             (self.results, [("user_id", self.ASCENDING), ("created_at", self.ASCENDING)], {}),
+            (self.admins, [("telegram_id", self.ASCENDING)], {"unique": True}),
         ]
         for collection, keys, options in indexes:
             if not self._create_index(collection, keys, **options):
@@ -1523,6 +1528,59 @@ class MongoDatabase:
     def get_user(self, telegram_id: int) -> dict | None:
         return self._clean(self.users.find_one({"_id": telegram_id}))
 
+    def is_admin_user(self, telegram_id: int) -> bool:
+        telegram_id = int(telegram_id or 0)
+        return telegram_id in ADMIN_TELEGRAM_IDS or bool(self.admins.find_one({"telegram_id": telegram_id}))
+
+    def admin_list_admins(self) -> list[dict]:
+        rows = [
+            {"telegram_id": admin_id, "name": "Env admin", "source": "env", "created_at": ""}
+            for admin_id in sorted(ADMIN_TELEGRAM_IDS)
+        ]
+        dynamic = self._clean_list(self.admins.find().sort("telegram_id", 1))
+        rows.extend({**row, "source": "database"} for row in dynamic if row["telegram_id"] not in ADMIN_TELEGRAM_IDS)
+        return rows
+
+    def admin_add_admin(self, telegram_id: int, name: str = "", added_by: int | None = None) -> dict:
+        telegram_id = int(telegram_id or 0)
+        if telegram_id <= 0:
+            raise ValueError("Telegram ID noto'g'ri")
+        doc = {
+            "_id": telegram_id,
+            "telegram_id": telegram_id,
+            "name": str(name or "").strip() or str(telegram_id),
+            "added_by": int(added_by or 0),
+            "created_at": now_iso(),
+        }
+        self.admins.update_one({"_id": telegram_id}, {"$set": doc}, upsert=True)
+        return self._clean(doc)
+
+    def admin_remove_admin(self, telegram_id: int) -> dict:
+        telegram_id = int(telegram_id or 0)
+        if telegram_id in ADMIN_TELEGRAM_IDS:
+            raise ValueError("Env orqali qo'shilgan adminni paneldan o'chirib bo'lmaydi")
+        result = self.admins.delete_one({"telegram_id": telegram_id})
+        if not result.deleted_count:
+            raise ValueError("Admin topilmadi")
+        return {"deleted": True, "telegram_id": telegram_id}
+
+    def get_payment_settings(self) -> dict:
+        row = self._clean(self.settings.find_one({"_id": "payment"})) or {}
+        return {
+            "card_number": row.get("card_number") or DEFAULT_PAYMENT_CARD_NUMBER,
+            "card_holder": row.get("card_holder") or DEFAULT_PAYMENT_CARD_HOLDER,
+            "updated_at": row.get("updated_at", ""),
+        }
+
+    def admin_update_payment_settings(self, data: dict) -> dict:
+        card_number = str(data.get("card_number", "")).strip()
+        card_holder = str(data.get("card_holder", "")).strip()
+        if len(card_number.replace(" ", "")) < 12 or len(card_holder) < 3:
+            raise ValueError("Karta raqami va karta egasini to'g'ri kiriting")
+        doc = {"card_number": card_number, "card_holder": card_holder, "updated_at": now_iso()}
+        self.settings.update_one({"_id": "payment"}, {"$set": doc}, upsert=True)
+        return self.get_payment_settings()
+
     def list_courses(self) -> list[dict]:
         return sorted(self._clean_list(self.courses.find().sort("id", 1)), key=natural_item_key)
 
@@ -1538,6 +1596,130 @@ class MongoDatabase:
 
     def is_enrolled(self, user_id: int, course_id: int) -> bool:
         return bool(self.enrollments.find_one({"user_id": user_id, "course_id": course_id, "status": "active"}))
+
+    def create_manual_payment_request(self, user_id: int, course_id: int) -> dict:
+        course = self.get_course(course_id)
+        if not course:
+            raise ValueError("Kurs topilmadi")
+        if self.is_enrolled(user_id, course_id):
+            raise ValueError("Siz bu kursni allaqachon sotib olgansiz")
+        existing = self._clean(
+            self.payments.find_one(
+                {"user_id": user_id, "course_id": course_id, "status": {"$in": ["awaiting_receipt", "pending_review"]}},
+                sort=[("created_at", -1)],
+            )
+        )
+        if existing and existing.get("status") == "pending_review":
+            raise ValueError("Bu kurs uchun chek adminga yuborilgan. Iltimos, admin tasdiqlashini kuting.")
+        if existing:
+            current_settings = self.get_payment_settings()
+            settings = {
+                "card_number": existing.get("card_number") or current_settings["card_number"],
+                "card_holder": existing.get("card_holder") or current_settings["card_holder"],
+                "updated_at": current_settings.get("updated_at", ""),
+            }
+            self.set_state(user_id, "awaiting_payment_receipt", {"payment_id": existing["id"], "course_id": course_id})
+            return {"payment": existing, "course": course, "settings": settings}
+        settings = self.get_payment_settings()
+        payment_id = self._next_id("payments")
+        doc = {
+            "_id": payment_id,
+            "id": payment_id,
+            "user_id": user_id,
+            "course_id": course_id,
+            "method": "manual_card",
+            "amount": course["price"],
+            "status": "awaiting_receipt",
+            "card_number": settings["card_number"],
+            "card_holder": settings["card_holder"],
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        self.payments.insert_one(doc)
+        self.set_state(user_id, "awaiting_payment_receipt", {"payment_id": payment_id, "course_id": course_id})
+        return {"payment": self._clean(doc), "course": course, "settings": settings}
+
+    def attach_payment_receipt(self, user_id: int, payment_id: int, receipt_type: str, receipt_file_id: str = "", receipt_text: str = "") -> dict:
+        payment = self._clean(self.payments.find_one({"id": int(payment_id), "user_id": int(user_id)}))
+        if not payment:
+            raise ValueError("To'lov topilmadi")
+        if payment.get("status") not in {"awaiting_receipt", "rejected"}:
+            raise ValueError("Bu to'lov uchun chek qabul qilinmaydi")
+        update = {
+            "status": "pending_review",
+            "receipt_type": receipt_type,
+            "receipt_file_id": receipt_file_id,
+            "receipt_text": receipt_text,
+            "submitted_at": now_iso(),
+            "updated_at": now_iso(),
+            "rejection_reason": "",
+        }
+        self.payments.update_one({"id": int(payment_id)}, {"$set": update})
+        self.clear_state(user_id)
+        return self.get_payment(payment_id)
+
+    def get_payment(self, payment_id: int) -> dict | None:
+        payment = self._clean(self.payments.find_one({"id": int(payment_id)}))
+        if not payment:
+            return None
+        user = self.get_user(payment["user_id"]) or {}
+        course = self.get_course(payment["course_id"]) or {}
+        payment["full_name"] = user.get("full_name", "")
+        payment["phone"] = user.get("phone", "")
+        payment["course_title"] = course.get("title", "")
+        return payment
+
+    def admin_approve_payment(self, payment_id: int, admin_id: int) -> dict:
+        payment = self.get_payment(payment_id)
+        if not payment:
+            raise ValueError("To'lov topilmadi")
+        if payment.get("status") == "confirmed":
+            return payment
+        if payment.get("status") != "pending_review":
+            raise ValueError("Bu to'lov hali chek yubormagan yoki rad etilgan")
+        timestamp = now_iso()
+        self.payments.update_one(
+            {"id": int(payment_id)},
+            {
+                "$set": {
+                    "status": "confirmed",
+                    "approved_by": int(admin_id),
+                    "approved_at": timestamp,
+                    "updated_at": timestamp,
+                }
+            },
+        )
+        self.enrollments.update_one(
+            {"_id": f"{payment['user_id']}:{payment['course_id']}"},
+            {
+                "$set": {"user_id": payment["user_id"], "course_id": payment["course_id"], "status": "active"},
+                "$setOnInsert": {"created_at": timestamp},
+            },
+            upsert=True,
+        )
+        return self.get_payment(payment_id)
+
+    def admin_reject_payment(self, payment_id: int, reason: str, admin_id: int) -> dict:
+        reason = str(reason or "").strip()
+        if len(reason) < 3:
+            raise ValueError("Rad etish sababi yozilishi kerak")
+        payment = self.get_payment(payment_id)
+        if not payment:
+            raise ValueError("To'lov topilmadi")
+        timestamp = now_iso()
+        self.payments.update_one(
+            {"id": int(payment_id)},
+            {
+                "$set": {
+                    "status": "rejected",
+                    "rejection_reason": reason,
+                    "rejected_by": int(admin_id),
+                    "rejected_at": timestamp,
+                    "updated_at": timestamp,
+                }
+            },
+        )
+        return self.get_payment(payment_id)
 
     def create_payment_and_enrollment(self, user_id: int, course_id: int, method: str) -> dict:
         course = self.get_course(course_id)
@@ -1922,12 +2104,7 @@ class MongoDatabase:
 
     def admin_payments(self) -> list[dict]:
         items = self._clean_list(self.payments.find().sort("created_at", -1).limit(100))
-        for item in items:
-            user = self.get_user(item["user_id"]) or {}
-            course = self.get_course(item["course_id"]) or {}
-            item["full_name"] = user.get("full_name", "")
-            item["course_title"] = course.get("title", "")
-        return items
+        return [self.get_payment(item["id"]) or item for item in items]
 
     def admin_results(self) -> list[dict]:
         items = self._clean_list(self.results.find().sort("created_at", -1).limit(100))
@@ -2117,6 +2294,22 @@ class TelegramClient:
         if not result.get("ok") and caption:
             self.send_message(chat_id, caption, reply_markup)
 
+    def send_photo(self, chat_id: int, photo: str, caption: str = "", reply_markup: dict | None = None) -> None:
+        payload = {"chat_id": chat_id, "photo": photo, "caption": caption, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        result = self.request("sendPhoto", payload)
+        if not result.get("ok") and caption:
+            self.send_message(chat_id, caption, reply_markup)
+
+    def send_document(self, chat_id: int, document: str, caption: str = "", reply_markup: dict | None = None) -> None:
+        payload = {"chat_id": chat_id, "document": document, "caption": caption, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        result = self.request("sendDocument", payload)
+        if not result.get("ok") and caption:
+            self.send_message(chat_id, caption, reply_markup)
+
     def download_file_data_url(self, file_id: str, default_mime: str = "image/jpeg") -> str:
         result = self.request("getFile", {"file_id": file_id}, timeout=20)
         if not result.get("ok"):
@@ -2154,12 +2347,26 @@ class FariksBot:
         self.offset: int | None = None
 
     @staticmethod
-    def main_keyboard() -> dict:
+    def main_keyboard(include_admin: bool = False) -> dict:
+        keyboard = [
+            [{"text": "📚 Kurslar"}, {"text": "📖 Mening kurslarim"}],
+            [{"text": "👤 Profilim"}, {"text": "💳 To'lovlarim"}],
+            [{"text": "🏆 Natijalarim"}],
+        ]
+        if include_admin:
+            keyboard.append([{"text": "🛠 Admin panel"}])
+        return {"keyboard": keyboard, "resize_keyboard": True}
+
+    @staticmethod
+    def admin_reply_keyboard() -> dict:
         return {
             "keyboard": [
-                [{"text": "📚 Kurslar"}, {"text": "📖 Mening kurslarim"}],
-                [{"text": "👤 Profilim"}, {"text": "💳 To'lovlarim"}],
-                [{"text": "🏆 Natijalarim"}],
+                [{"text": "📊 Statistika"}, {"text": "📚 Kurslar"}],
+                [{"text": "➕ Yangi kurs"}, {"text": "🧩 Yangi modul"}],
+                [{"text": "🎬 Yangi dars"}, {"text": "🎥 Darsga video"}],
+                [{"text": "📝 Test savoli"}, {"text": "💳 Karta sozlash"}],
+                [{"text": "👑 Admin qo'shish"}, {"text": "🗑 Admin o'chirish"}],
+                [{"text": "🌐 Web admin panel"}, {"text": "🏠 Asosiy menyu"}],
             ],
             "resize_keyboard": True,
         }
@@ -2173,7 +2380,7 @@ class FariksBot:
         }
 
     def is_admin_user(self, user_id: int) -> bool:
-        return user_id in ADMIN_TELEGRAM_IDS
+        return self.db.is_admin_user(user_id)
 
     def admin_web_link(self, user_id: int, from_user: dict) -> str:
         first_name = str(from_user.get("first_name") or "").strip()
@@ -2205,6 +2412,7 @@ class FariksBot:
         }
 
     def show_admin_panel(self, chat_id: int, user_id: int, from_user: dict) -> None:
+        self.db.set_state(user_id, "admin_menu")
         summary = self.db.admin_summary()
         text = (
             "🛠 <b>FARIKS admin panel</b>\n\n"
@@ -2214,7 +2422,7 @@ class FariksBot:
             f"👥 O'quvchilar: {summary['students']}\n\n"
             "Kerakli amalni tanlang."
         )
-        self.telegram.send_message(chat_id, text, self.admin_keyboard(user_id, from_user))
+        self.telegram.send_message(chat_id, text, self.admin_reply_keyboard())
 
     def show_admin_stats(self, chat_id: int, user_id: int, from_user: dict) -> None:
         summary = self.db.admin_summary()
@@ -2228,12 +2436,12 @@ class FariksBot:
             f"💳 To'lovlar: {summary['payments']}\n"
             f"🏆 Natijalar: {summary['results']}"
         )
-        self.telegram.send_message(chat_id, text, self.admin_keyboard(user_id, from_user))
+        self.telegram.send_message(chat_id, text, self.admin_reply_keyboard())
 
     def show_admin_courses(self, chat_id: int, user_id: int, from_user: dict) -> None:
         courses = self.db.admin_courses()
         if not courses:
-            self.telegram.send_message(chat_id, "Hali kurs yo'q.", self.admin_keyboard(user_id, from_user))
+            self.telegram.send_message(chat_id, "Hali kurs yo'q.", self.admin_reply_keyboard())
             return
         lines = ["📚 <b>Kurslar</b>\n"]
         for course in courses[:20]:
@@ -2248,7 +2456,7 @@ class FariksBot:
                 f"💰 Narxi: {format_money(course['price'])}\n"
                 f"🧩 Modul: {len(course.get('modules', []))}, 🎬 dars: {lessons_count}, 📝 savol: {question_count}\n"
             )
-        self.telegram.send_message(chat_id, "\n".join(lines), self.admin_keyboard(user_id, from_user))
+        self.telegram.send_message(chat_id, "\n".join(lines), self.admin_reply_keyboard())
 
     def show_admin_course_picker(self, chat_id: int, prefix: str, empty_text: str) -> None:
         courses = self.db.list_courses()
@@ -2328,6 +2536,108 @@ class FariksBot:
         return ""
 
     @staticmethod
+    def extract_receipt_ref(message: dict, text: str) -> tuple[str, str, str]:
+        photos = message.get("photo") or []
+        if photos:
+            return "photo", photos[-1]["file_id"], ""
+        document = message.get("document") or {}
+        if document.get("file_id"):
+            return "document", document["file_id"], ""
+        if text:
+            return "text", "", text.strip()
+        return "", "", ""
+
+    def payment_review_keyboard(self, payment_id: int) -> dict:
+        return {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Tasdiqlash", "callback_data": f"admin:pay_approve:{payment_id}"},
+                    {"text": "❌ Rad etish", "callback_data": f"admin:pay_reject:{payment_id}"},
+                ]
+            ]
+        }
+
+    def notify_admins_payment(self, payment: dict) -> None:
+        caption = (
+            "🧾 <b>Yangi to'lov cheki</b>\n\n"
+            f"👤 O'quvchi: {html.escape(payment.get('full_name') or '-')}\n"
+            f"📞 Telefon: {html.escape(payment.get('phone') or '-')}\n"
+            f"📚 Kurs: {html.escape(payment.get('course_title') or '-')}\n"
+            f"💰 Summa: {format_money(int(payment.get('amount') or 0))}\n"
+            f"🆔 To'lov ID: {payment['id']}"
+        )
+        keyboard = self.payment_review_keyboard(payment["id"])
+        admin_ids = [item["telegram_id"] for item in self.db.admin_list_admins()]
+        for admin_id in admin_ids:
+            receipt_type = payment.get("receipt_type", "")
+            file_id = payment.get("receipt_file_id", "")
+            if receipt_type == "photo" and file_id:
+                self.telegram.send_photo(admin_id, file_id, caption, keyboard)
+            elif receipt_type == "document" and file_id:
+                self.telegram.send_document(admin_id, file_id, caption, keyboard)
+            else:
+                receipt_text = html.escape(payment.get("receipt_text") or "Chek matni yo'q")
+                self.telegram.send_message(admin_id, f"{caption}\n\n📝 Chek: {receipt_text}", keyboard)
+
+    def handle_admin_menu_text(self, chat_id: int, user_id: int, text: str, from_user: dict) -> bool:
+        if text == "📊 Statistika":
+            self.show_admin_stats(chat_id, user_id, from_user)
+            return True
+        if text == "📚 Kurslar":
+            self.show_admin_courses(chat_id, user_id, from_user)
+            return True
+        if text == "➕ Yangi kurs":
+            self.db.set_state(user_id, "admin_course_title")
+            self.telegram.send_message(chat_id, "➕ Yangi kurs nomini yozing.\n\nBekor qilish: /cancel")
+            return True
+        if text == "🧩 Yangi modul":
+            self.show_admin_course_picker(chat_id, "admin:module_course:", "Avval kurs qo'shing.")
+            return True
+        if text == "🎬 Yangi dars":
+            self.show_admin_module_picker(chat_id, "admin:lesson_module:", "Avval kurs va modul qo'shing.")
+            return True
+        if text == "🎥 Darsga video":
+            self.show_admin_lesson_picker(chat_id, "admin:video_lesson:", "Avval dars qo'shing.")
+            return True
+        if text == "📝 Test savoli":
+            self.show_admin_lesson_picker(chat_id, "admin:question_lesson:", "Avval dars qo'shing.")
+            return True
+        if text == "💳 Karta sozlash":
+            settings = self.db.get_payment_settings()
+            self.db.set_state(user_id, "admin_card_number")
+            self.telegram.send_message(
+                chat_id,
+                "💳 Karta raqamini yozing.\n\n"
+                f"Hozirgi karta: <code>{html.escape(settings['card_number'])}</code>\n"
+                "Bekor qilish: /cancel",
+            )
+            return True
+        if text == "👑 Admin qo'shish":
+            self.db.set_state(user_id, "admin_add_admin")
+            self.telegram.send_message(chat_id, "Yangi admin Telegram ID sini yozing.\n\nMasalan: 7903688837")
+            return True
+        if text == "🗑 Admin o'chirish":
+            admins = self.db.admin_list_admins()
+            lines = ["🗑 <b>Admin o'chirish</b>\n", "O'chiriladigan admin Telegram ID sini yozing.\n"]
+            for item in admins:
+                lines.append(f"{item['telegram_id']} - {html.escape(item.get('name') or item.get('source') or '')}")
+            self.db.set_state(user_id, "admin_remove_admin")
+            self.telegram.send_message(chat_id, "\n".join(lines))
+            return True
+        if text == "🌐 Web admin panel":
+            link = self.admin_web_link(user_id, from_user)
+            self.telegram.send_message(chat_id, f"🌐 Web admin panel:\n\n{link}", {"inline_keyboard": [[{"text": "Web panelni ochish", "url": link}]]})
+            return True
+        if text == "🏠 Asosiy menyu":
+            self.db.clear_state(user_id)
+            self.telegram.send_message(chat_id, "Asosiy menyu:", self.main_keyboard(True))
+            return True
+        if text == "🛠 Admin panel":
+            self.show_admin_panel(chat_id, user_id, from_user)
+            return True
+        return False
+
+    @staticmethod
     def normalize_trig(value: str) -> str:
         name = value.strip().lower()
         if name in {"tg", "tan"}:
@@ -2400,12 +2710,26 @@ class FariksBot:
             return
 
         state, payload = self.db.get_state(user_id)
+        if self.is_admin_user(user_id) and state == "admin_menu":
+            if self.handle_admin_menu_text(chat_id, user_id, text, message.get("from", {})):
+                return
+            self.show_admin_panel(chat_id, user_id, message.get("from", {}))
+            return
+
         if self.is_admin_user(user_id) and state and state.startswith("admin_"):
             if command == "/cancel":
                 self.db.clear_state(user_id)
-                self.telegram.send_message(chat_id, "Admin amal bekor qilindi.", self.admin_keyboard(user_id, message.get("from", {})))
+                self.telegram.send_message(chat_id, "Admin amal bekor qilindi.", self.admin_reply_keyboard())
                 return
             self.handle_admin_state_message(message, state, payload)
+            return
+
+        if self.is_admin_user(user_id) and text == "🛠 Admin panel":
+            self.show_admin_panel(chat_id, user_id, message.get("from", {}))
+            return
+
+        if state == "awaiting_payment_receipt":
+            self.handle_payment_receipt(message, payload)
             return
 
         if state == "awaiting_name":
@@ -2425,7 +2749,7 @@ class FariksBot:
             self.telegram.send_message(
                 chat_id,
                 "✅ Ro'yxatdan o'tish muvaffaqiyatli yakunlandi.\n\nAsosiy menyu:",
-                self.main_keyboard(),
+                self.main_keyboard(self.is_admin_user(user_id)),
             )
             return
 
@@ -2449,7 +2773,7 @@ class FariksBot:
         elif text == "🏆 Natijalarim":
             self.show_results(chat_id, user_id)
         else:
-            self.telegram.send_message(chat_id, "Menyudan kerakli bo'limni tanlang.", self.main_keyboard())
+            self.telegram.send_message(chat_id, "Menyudan kerakli bo'limni tanlang.", self.main_keyboard(self.is_admin_user(user_id)))
 
     def handle_callback(self, callback: dict) -> None:
         callback_id = callback["id"]
@@ -2477,10 +2801,10 @@ class FariksBot:
 
         if data.startswith("buy:"):
             course_id = int(data.split(":", 1)[1])
-            self.show_payment_methods(chat_id, course_id)
+            self.start_manual_payment(chat_id, user_id, course_id)
         elif data.startswith("pay:"):
             _, course_id, method = data.split(":", 2)
-            self.confirm_payment(chat_id, user_id, int(course_id), method)
+            self.start_manual_payment(chat_id, user_id, int(course_id))
         elif data == "mycourses":
             self.show_my_courses(chat_id, user_id)
         elif data.startswith("open_course:"):
@@ -2498,7 +2822,7 @@ class FariksBot:
 
     def start(self, chat_id: int, user_id: int) -> None:
         if self.db.get_user(user_id):
-            self.telegram.send_message(chat_id, "Asosiy menyu:", self.main_keyboard())
+            self.telegram.send_message(chat_id, "Asosiy menyu:", self.main_keyboard(self.is_admin_user(user_id)))
             return
         self.telegram.send_message(
             chat_id,
@@ -2521,6 +2845,31 @@ class FariksBot:
         if data == "admin:home":
             self.db.clear_state(user_id)
             self.show_admin_panel(chat_id, user_id, from_user)
+            return
+        if data.startswith("admin:pay_approve:"):
+            payment_id = int(data.rsplit(":", 1)[1])
+            try:
+                payment = self.db.admin_approve_payment(payment_id, user_id)
+            except ValueError as error:
+                self.telegram.send_message(chat_id, str(error), self.admin_reply_keyboard())
+                return
+            self.telegram.send_message(
+                chat_id,
+                f"✅ To'lov tasdiqlandi.\n\nO'quvchi: <b>{html.escape(payment.get('full_name') or '-')}</b>\n"
+                f"Kurs: <b>{html.escape(payment.get('course_title') or '-')}</b>",
+                self.admin_reply_keyboard(),
+            )
+            self.telegram.send_message(
+                payment["user_id"],
+                "✅ To'lov tasdiqlandi.\n\n"
+                f"Siz <b>{html.escape(payment.get('course_title') or '')}</b> kursini muvaffaqiyatli sotib oldingiz.",
+                {"inline_keyboard": [[{"text": "📚 Mening kurslarim", "callback_data": "mycourses"}]]},
+            )
+            return
+        if data.startswith("admin:pay_reject:"):
+            payment_id = int(data.rsplit(":", 1)[1])
+            self.db.set_state(user_id, "admin_reject_payment_reason", {"payment_id": payment_id})
+            self.telegram.send_message(chat_id, "❌ To'lovni rad etish sababini yozing.\n\nMasalan: Chekdagi summa yetarli emas.")
             return
         if data == "admin:stats":
             self.show_admin_stats(chat_id, user_id, from_user)
@@ -2595,6 +2944,79 @@ class FariksBot:
         user_id = int(message["from"]["id"])
         text = str(message.get("text", "")).strip()
 
+        if state == "admin_reject_payment_reason":
+            try:
+                payment = self.db.admin_reject_payment(int(payload.get("payment_id") or 0), text, user_id)
+            except ValueError as error:
+                self.telegram.send_message(chat_id, str(error))
+                return
+            self.db.clear_state(user_id)
+            reason = payment.get("rejection_reason") or text
+            self.telegram.send_message(
+                chat_id,
+                f"❌ To'lov rad etildi.\n\nO'quvchi: <b>{html.escape(payment.get('full_name') or '-')}</b>\n"
+                f"Sabab: {html.escape(reason)}",
+                self.admin_reply_keyboard(),
+            )
+            self.telegram.send_message(
+                payment["user_id"],
+                "❌ To'lov rad etildi.\n\n"
+                f"Sabab: {html.escape(reason)}\n\n"
+                "Iltimos, to'lovni tekshirib qayta urinib ko'ring.",
+                self.main_keyboard(self.is_admin_user(int(payment["user_id"]))),
+            )
+            return
+
+        if state == "admin_card_number":
+            if len(re.sub(r"\D+", "", text)) < 12:
+                self.telegram.send_message(chat_id, "Karta raqamini to'liq yozing. Masalan: 8600 1234 5678 9012")
+                return
+            payload["card_number"] = text
+            self.db.set_state(user_id, "admin_card_holder", payload)
+            self.telegram.send_message(chat_id, "Karta egasining ism familiyasini yozing.\n\nMasalan: FARIKS O'QUV MARKAZI")
+            return
+
+        if state == "admin_card_holder":
+            if len(text) < 3:
+                self.telegram.send_message(chat_id, "Karta egasining ism familiyasini to'liq yozing.")
+                return
+            settings = self.db.admin_update_payment_settings({"card_number": payload.get("card_number"), "card_holder": text})
+            self.db.clear_state(user_id)
+            self.telegram.send_message(
+                chat_id,
+                "✅ Karta ma'lumotlari yangilandi.\n\n"
+                f"Karta: <code>{html.escape(settings['card_number'])}</code>\n"
+                f"Karta egasi: <b>{html.escape(settings['card_holder'])}</b>",
+                self.admin_reply_keyboard(),
+            )
+            return
+
+        if state == "admin_add_admin":
+            telegram_id = int(re.sub(r"\D+", "", text) or 0)
+            try:
+                admin = self.db.admin_add_admin(telegram_id, added_by=user_id)
+            except ValueError as error:
+                self.telegram.send_message(chat_id, str(error))
+                return
+            self.db.clear_state(user_id)
+            self.telegram.send_message(
+                chat_id,
+                f"✅ Yangi admin qo'shildi: <code>{admin['telegram_id']}</code>",
+                self.admin_reply_keyboard(),
+            )
+            return
+
+        if state == "admin_remove_admin":
+            telegram_id = int(re.sub(r"\D+", "", text) or 0)
+            try:
+                self.db.admin_remove_admin(telegram_id)
+            except ValueError as error:
+                self.telegram.send_message(chat_id, str(error))
+                return
+            self.db.clear_state(user_id)
+            self.telegram.send_message(chat_id, f"✅ Admin o'chirildi: <code>{telegram_id}</code>", self.admin_reply_keyboard())
+            return
+
         if state == "admin_course_title":
             if len(text) < 3:
                 self.telegram.send_message(chat_id, "Kurs nomini to'liq yozing.")
@@ -2617,7 +3039,7 @@ class FariksBot:
             payload["description"] = "" if text == "-" else text
             course = self.db.admin_create_course(payload)
             self.db.clear_state(user_id)
-            self.telegram.send_message(chat_id, f"Kurs qo'shildi: <b>{html.escape(course['title'])}</b>", self.admin_keyboard(user_id, message.get("from", {})))
+            self.telegram.send_message(chat_id, f"Kurs qo'shildi: <b>{html.escape(course['title'])}</b>", self.admin_reply_keyboard())
             return
 
         if state == "admin_module_title":
@@ -2633,7 +3055,7 @@ class FariksBot:
             payload["position"] = int(re.sub(r"\D+", "", text) or 1)
             module = self.db.admin_create_module(payload)
             self.db.clear_state(user_id)
-            self.telegram.send_message(chat_id, f"Modul qo'shildi: <b>{html.escape(module['title'])}</b>", self.admin_keyboard(user_id, message.get("from", {})))
+            self.telegram.send_message(chat_id, f"Modul qo'shildi: <b>{html.escape(module['title'])}</b>", self.admin_reply_keyboard())
             return
 
         if state == "admin_lesson_title":
@@ -2664,7 +3086,7 @@ class FariksBot:
             payload["position"] = len(self.db.list_module_lessons(int(payload["module_id"]))) + 1
             lesson = self.db.admin_create_lesson(payload)
             self.db.clear_state(user_id)
-            self.telegram.send_message(chat_id, f"Dars qo'shildi: <b>{html.escape(lesson['title'])}</b>", self.admin_keyboard(user_id, message.get("from", {})))
+            self.telegram.send_message(chat_id, f"Dars qo'shildi: <b>{html.escape(lesson['title'])}</b>", self.admin_reply_keyboard())
             return
 
         if state == "admin_video_value":
@@ -2674,7 +3096,7 @@ class FariksBot:
                 return
             lesson = self.db.admin_update_lesson_video(int(payload["lesson_id"]), video_ref)
             self.db.clear_state(user_id)
-            self.telegram.send_message(chat_id, f"Video saqlandi: <b>{html.escape(lesson['title'])}</b>", self.admin_keyboard(user_id, message.get("from", {})))
+            self.telegram.send_message(chat_id, f"Video saqlandi: <b>{html.escape(lesson['title'])}</b>", self.admin_reply_keyboard())
             return
 
         if state == "admin_question_image":
@@ -2796,38 +3218,83 @@ class FariksBot:
             keyboard.append([{"text": f"🛒 {course['title']}", "callback_data": f"buy:{course['id']}"}])
         self.telegram.send_message(chat_id, "\n".join(lines), {"inline_keyboard": keyboard})
 
+    def start_manual_payment(self, chat_id: int, user_id: int, course_id: int) -> None:
+        try:
+            result = self.db.create_manual_payment_request(user_id, course_id)
+        except ValueError as error:
+            self.telegram.send_message(chat_id, str(error), self.main_keyboard(self.is_admin_user(user_id)))
+            return
+        course = result["course"]
+        payment = result["payment"]
+        settings = result["settings"]
+        text = (
+            "💳 <b>Qo'lda to'lov</b>\n\n"
+            f"📚 Kurs: <b>{html.escape(course['title'])}</b>\n"
+            f"💰 To'lov summasi: <b>{format_money(int(payment['amount']))}</b>\n\n"
+            f"💳 Karta raqami: <code>{html.escape(settings['card_number'])}</code>\n"
+            f"👤 Karta egasi: <b>{html.escape(settings['card_holder'])}</b>\n\n"
+            "Shu kartaga yuqoridagi summani to'lang va chek rasmini yoki faylini shu yerga yuboring.\n"
+            f"🆔 To'lov ID: <code>{payment['id']}</code>"
+        )
+        self.telegram.send_message(chat_id, text)
+
+    def handle_payment_receipt(self, message: dict, payload: dict) -> None:
+        chat_id = int(message["chat"]["id"])
+        user_id = int(message["from"]["id"])
+        text = str(message.get("text", "")).strip()
+        if text == "/cancel":
+            self.db.clear_state(user_id)
+            self.telegram.send_message(chat_id, "To'lov cheki yuborish bekor qilindi.", self.main_keyboard(self.is_admin_user(user_id)))
+            return
+        receipt_type, receipt_file_id, receipt_text = self.extract_receipt_ref(message, text)
+        if not receipt_type:
+            self.telegram.send_message(chat_id, "Iltimos, to'lov chekini rasm, fayl yoki matn ko'rinishida yuboring.")
+            return
+        try:
+            payment = self.db.attach_payment_receipt(
+                user_id,
+                int(payload.get("payment_id") or 0),
+                receipt_type,
+                receipt_file_id,
+                receipt_text,
+            )
+        except ValueError as error:
+            self.telegram.send_message(chat_id, str(error), self.main_keyboard(self.is_admin_user(user_id)))
+            return
+        self.notify_admins_payment(payment)
+        self.telegram.send_message(
+            chat_id,
+            "✅ Chek adminga yuborildi.\n\nAdmin tekshirgandan keyin sizga xabar keladi.",
+            self.main_keyboard(self.is_admin_user(user_id)),
+        )
+
+    @staticmethod
+    def payment_status_label(status: str) -> str:
+        labels = {
+            "awaiting_receipt": "⏳ Chek kutilmoqda",
+            "pending_review": "🧾 Admin tekshiryapti",
+            "confirmed": "✅ Tasdiqlangan",
+            "rejected": "❌ Rad etilgan",
+        }
+        return labels.get(status or "", status or "-")
+
     def show_payment_methods(self, chat_id: int, course_id: int) -> None:
         course = self.db.get_course(course_id)
         if not course:
             self.telegram.send_message(chat_id, "Kurs topilmadi.")
             return
-        methods = [
-            ("Click", "click"),
-            ("Payme", "payme"),
-            ("Uzum", "uzum"),
-            ("Karta orqali", "card"),
-        ]
-        keyboard = [[{"text": name, "callback_data": f"pay:{course_id}:{code}"}] for name, code in methods]
         self.telegram.send_message(
             chat_id,
-            f"<b>{course['title']}</b>\nNarxi: {format_money(course['price'])}\n\nTo'lov usulini tanlang.",
-            {"inline_keyboard": keyboard},
+            f"<b>{html.escape(course['title'])}</b>\nNarxi: {format_money(course['price'])}\n\nTo'lov faqat karta orqali qo'lda qabul qilinadi.",
         )
 
     def confirm_payment(self, chat_id: int, user_id: int, course_id: int, method: str) -> None:
-        result = self.db.create_payment_and_enrollment(user_id, course_id, method)
-        course = result["course"]
-        self.telegram.send_message(
-            chat_id,
-            "✅ To'lov tasdiqlandi.\n\n"
-            f"Siz <b>{course['title']}</b> kursiga muvaffaqiyatli qo'shildingiz.",
-            {"inline_keyboard": [[{"text": "📚 Mening kurslarim", "callback_data": "mycourses"}]]},
-        )
+        self.start_manual_payment(chat_id, user_id, course_id)
 
     def show_my_courses(self, chat_id: int, user_id: int) -> None:
         enrollments = self.db.list_enrollments(user_id)
         if not enrollments:
-            self.telegram.send_message(chat_id, "Sizda hali sotib olingan kurslar yo'q.", self.main_keyboard())
+            self.telegram.send_message(chat_id, "Sizda hali sotib olingan kurslar yo'q.", self.main_keyboard(self.is_admin_user(user_id)))
             return
         keyboard = [
             [{"text": f"📘 {item['title']}", "callback_data": f"open_course:{item['course_id']}"}]
@@ -2908,27 +3375,30 @@ class FariksBot:
             f"Kurslar: {stats['enrollments']}\n"
             f"O'tilgan darslar: {stats['passed_lessons']}\n"
             f"O'rtacha natija: {stats['average_percent']}%",
-            self.main_keyboard(),
+            self.main_keyboard(self.is_admin_user(user_id)),
         )
 
     def show_payments(self, chat_id: int, user_id: int) -> None:
         payments = self.db.list_payments(user_id)
         if not payments:
-            self.telegram.send_message(chat_id, "Hozircha to'lovlar topilmadi.", self.main_keyboard())
+            self.telegram.send_message(chat_id, "Hozircha to'lovlar topilmadi.", self.main_keyboard(self.is_admin_user(user_id)))
             return
         lines = ["💳 <b>To'lovlarim</b>\n"]
         for payment in payments[:10]:
+            status = self.payment_status_label(payment.get("status", ""))
+            reason = f"Sabab: {html.escape(payment.get('rejection_reason') or '')}\n" if payment.get("rejection_reason") else ""
             lines.append(
-                f"✅ {payment['course_title']}\n"
-                f"Usul: {payment['method']}\n"
-                f"Summa: {format_money(payment['amount'])}\n"
+                f"{status}\n"
+                f"📚 {html.escape(payment.get('course_title') or '-')}\n"
+                f"💰 Summa: {format_money(payment['amount'])}\n"
+                f"{reason}"
             )
-        self.telegram.send_message(chat_id, "\n".join(lines), self.main_keyboard())
+        self.telegram.send_message(chat_id, "\n".join(lines), self.main_keyboard(self.is_admin_user(user_id)))
 
     def show_results(self, chat_id: int, user_id: int) -> None:
         results = self.db.list_results(user_id)
         if not results:
-            self.telegram.send_message(chat_id, "Hozircha natijalar yo'q.", self.main_keyboard())
+            self.telegram.send_message(chat_id, "Hozircha natijalar yo'q.", self.main_keyboard(self.is_admin_user(user_id)))
             return
         lines = ["🏆 <b>Natijalarim</b>\n"]
         for result in results[:10]:
@@ -2937,7 +3407,7 @@ class FariksBot:
                 f"{icon} {result['lesson_title']}\n"
                 f"Natija: {result['correct_count']}/{result['total_count']} - {result['percent']}%\n"
             )
-        self.telegram.send_message(chat_id, "\n".join(lines), self.main_keyboard())
+        self.telegram.send_message(chat_id, "\n".join(lines), self.main_keyboard(self.is_admin_user(user_id)))
 
 
 def make_handler(db: Database, telegram: TelegramClient):
@@ -3091,7 +3561,7 @@ def make_handler(db: Database, telegram: TelegramClient):
             except ValueError:
                 return None
             telegram_id = int(claims.get("telegram_id") or 0)
-            if telegram_id and telegram_id in ADMIN_TELEGRAM_IDS:
+            if telegram_id and db.is_admin_user(telegram_id):
                 return claims
             return None
 
@@ -3116,10 +3586,23 @@ def make_handler(db: Database, telegram: TelegramClient):
                 self.send_json({"ok": True, "data": db.admin_payments()})
             elif path == "/api/admin/results":
                 self.send_json({"ok": True, "data": db.admin_results()})
+            elif path == "/api/admin/settings":
+                self.send_json(
+                    {
+                        "ok": True,
+                        "data": {
+                            "payment": db.get_payment_settings(),
+                            "admins": db.admin_list_admins(),
+                        },
+                    }
+                )
             else:
                 self.send_json({"ok": False, "error": "Admin endpoint topilmadi"}, status=404)
 
         def handle_admin_post(self, path: str, body: dict) -> None:
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            claims = self.admin_claims(query) or {}
+            admin_id = int(claims.get("telegram_id") or 0)
             if path == "/api/admin/courses":
                 self.send_json({"ok": True, "data": db.admin_create_course(body)}, status=201)
             elif path == "/api/admin/modules":
@@ -3130,6 +3613,27 @@ def make_handler(db: Database, telegram: TelegramClient):
                 self.send_json({"ok": True, "data": db.admin_update_lesson_video(body.get("lesson_id"), body.get("video_url"))})
             elif path == "/api/admin/questions":
                 self.send_json({"ok": True, "data": db.admin_create_question(body)}, status=201)
+            elif path == "/api/admin/settings/payment":
+                self.send_json({"ok": True, "data": db.admin_update_payment_settings(body)})
+            elif path == "/api/admin/admins":
+                self.send_json({"ok": True, "data": db.admin_add_admin(body.get("telegram_id"), body.get("name", ""), admin_id)}, status=201)
+            elif path == "/api/admin/payments/approve":
+                payment = db.admin_approve_payment(body.get("payment_id"), admin_id)
+                telegram.send_message(
+                    payment["user_id"],
+                    "✅ To'lov tasdiqlandi.\n\n"
+                    f"Siz <b>{html.escape(payment.get('course_title') or '')}</b> kursini muvaffaqiyatli sotib oldingiz.",
+                    {"inline_keyboard": [[{"text": "📚 Mening kurslarim", "callback_data": "mycourses"}]]},
+                )
+                self.send_json({"ok": True, "data": payment})
+            elif path == "/api/admin/payments/reject":
+                payment = db.admin_reject_payment(body.get("payment_id"), body.get("reason", ""), admin_id)
+                telegram.send_message(
+                    payment["user_id"],
+                    "❌ To'lov rad etildi.\n\n"
+                    f"Sabab: {html.escape(payment.get('rejection_reason') or '')}",
+                )
+                self.send_json({"ok": True, "data": payment})
             else:
                 self.send_json({"ok": False, "error": "Admin endpoint topilmadi"}, status=404)
 
@@ -3139,6 +3643,8 @@ def make_handler(db: Database, telegram: TelegramClient):
                 self.send_json({"ok": True, "data": db.admin_delete_course(int(parts[3]))})
             elif len(parts) == 4 and parts[:3] == ["api", "admin", "questions"]:
                 self.send_json({"ok": True, "data": db.admin_delete_question(int(parts[3]))})
+            elif len(parts) == 4 and parts[:3] == ["api", "admin", "admins"]:
+                self.send_json({"ok": True, "data": db.admin_remove_admin(int(parts[3]))})
             else:
                 self.send_json({"ok": False, "error": "Admin endpoint topilmadi"}, status=404)
 
