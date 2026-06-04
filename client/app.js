@@ -204,7 +204,7 @@ function renderShell(content, subtitle = "Online test platformasi") {
           <div class="brand">
             <div class="mark">F</div>
             <div>
-              <strong>FARIKS LMS</strong>
+              <strong>FARIKS</strong>
               <span>${escapeHtml(subtitle)}</span>
             </div>
           </div>
@@ -1166,6 +1166,110 @@ function renderAdminUsersPanel() {
   `;
 }
 
+function renderCourseCreatePanel() {
+  return `
+    <section class="panel pad admin-form-card admin-task-card">
+      <div class="form-title">
+        <span class="step-badge">1</span>
+        <div>
+          <h2>Kurs yaratish</h2>
+          <p class="muted">Yangi kursni oching, keyin unga modul va dars qo'shing.</p>
+        </div>
+      </div>
+      <form class="form-grid" id="courseForm">
+        <div class="field"><label>Kurs nomi</label><input name="title" required placeholder="Milliy Sertifikat Matematika" /></div>
+        <div class="field"><label>Narxi</label><input name="price" type="number" min="1" required placeholder="300000" /></div>
+        <div class="field"><label>Tavsif</label><textarea name="description" placeholder="Kurs kimlar uchun va nimani o'rgatadi"></textarea></div>
+        <button class="btn success">Kursni saqlash</button>
+      </form>
+    </section>
+  `;
+}
+
+function renderModuleCreatePanel(hasCourses) {
+  return `
+    <section class="panel pad admin-form-card admin-task-card">
+      <div class="form-title">
+        <span class="step-badge">2</span>
+        <div>
+          <h2>Modul yaratish</h2>
+          <p class="muted">Modul tanlangan kurs ichida ko'rinadi.</p>
+        </div>
+      </div>
+      <form class="form-grid" id="moduleForm">
+        <div class="field">
+          <label>Kurs</label>
+          <select name="course_id" required ${hasCourses ? "" : "disabled"}>
+            ${renderCourseOptions(adminState.courses)}
+          </select>
+        </div>
+        <div class="field"><label>Modul nomi</label><input name="title" required placeholder="1-MODUL: Algebra asoslari" /></div>
+        <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
+        ${hasCourses ? "" : `<p class="empty-hint">Avval kurs yarating.</p>`}
+        <button class="btn success" ${hasCourses ? "" : "disabled"}>Modulni saqlash</button>
+      </form>
+    </section>
+  `;
+}
+
+function renderLessonCreatePanel(modules, hasModules) {
+  return `
+    <section class="panel pad admin-form-card admin-task-card">
+      <div class="form-title">
+        <span class="step-badge">3</span>
+        <div>
+          <h2>Dars qo'shish</h2>
+          <p class="muted">Dars modul ichida ochiladi, test foizi keyingi darsni ochadi.</p>
+        </div>
+      </div>
+      <form class="form-grid" id="lessonForm">
+        <div class="split">
+          <div class="field">
+            <label>Modul</label>
+            <select name="module_id" required ${hasModules ? "" : "disabled"}>
+              ${renderModuleOptions(modules)}
+            </select>
+          </div>
+          <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
+        </div>
+        <div class="field"><label>Dars nomi</label><input name="title" required placeholder="1-Dars: Chiziqli tenglamalar" /></div>
+        <div class="field"><label>Video</label><input name="video_url" placeholder="YouTube link yoki bo'sh qoldiring" /></div>
+        <div class="split">
+          <div class="field"><label>Vaqt, daqiqa</label><input name="duration_minutes" type="number" value="30" min="1" /></div>
+          <div class="field"><label>O'tish foizi</label><input name="pass_percent" type="number" value="80" min="1" max="100" /></div>
+        </div>
+        ${hasModules ? "" : `<p class="empty-hint">Avval modul yarating.</p>`}
+        <button class="btn success" ${hasModules ? "" : "disabled"}>Darsni saqlash</button>
+      </form>
+    </section>
+  `;
+}
+
+function renderLessonVideoPanel(lessons, hasLessons) {
+  return `
+    <section class="panel pad admin-form-card admin-task-card">
+      <div class="form-title">
+        <span class="step-badge">3A</span>
+        <div>
+          <h2>Dars videosini yangilash</h2>
+          <p class="muted">YouTube link kiriting yoki Telegram botda /admin -> Darsga video orqali video fayl yuboring.</p>
+        </div>
+      </div>
+      <form class="form-grid" id="videoForm">
+        <div class="field">
+          <label>Dars</label>
+          <select name="lesson_id" required ${hasLessons ? "" : "disabled"}>
+            ${renderLessonOptions(lessons)}
+          </select>
+        </div>
+        <div class="field"><label>Video</label><input name="video_url" required placeholder="https://youtu.be/..." /></div>
+        ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
+        <button class="btn success" ${hasLessons ? "" : "disabled"}>Videoni saqlash</button>
+      </form>
+    </section>
+  `;
+}
+
 function renderAdmin() {
   const summary = adminState.summary || {};
   const modules = allModules();
@@ -1173,59 +1277,26 @@ function renderAdmin() {
   const hasCourses = adminState.courses.length > 0;
   const hasModules = modules.length > 0;
   const hasLessons = lessons.length > 0;
-  renderShell(`
-    <div class="admin-grid">
-      <aside class="admin-stack">
-        ${renderAdminAccessPanel()}
-        ${renderPaymentSettingsPanel()}
-        ${renderAdminUsersPanel()}
 
-        <section class="panel pad admin-form-card">
-          <div class="form-title">
-            <span class="step-badge">1</span>
-            <div>
-              <h2>Kurs yaratish</h2>
-              <p class="muted">Yangi kursni oching, keyin unga modul va dars qo'shing.</p>
-            </div>
-          </div>
-          <form class="form-grid" id="courseForm">
-            <div class="field"><label>Kurs nomi</label><input name="title" required placeholder="Milliy Sertifikat Matematika" /></div>
-            <div class="field"><label>Narxi</label><input name="price" type="number" min="1" required placeholder="300000" /></div>
-            <div class="field"><label>Tavsif</label><textarea name="description" placeholder="Kurs kimlar uchun va nimani o'rgatadi"></textarea></div>
-            <button class="btn success">Kursni saqlash</button>
-          </form>
-        </section>
-
-        <section class="panel pad admin-form-card">
-          <div class="form-title">
-            <span class="step-badge">2</span>
-            <div>
-              <h2>Modul yaratish</h2>
-              <p class="muted">Modul tanlangan kurs ichida ko'rinadi.</p>
-            </div>
-          </div>
-          <form class="form-grid" id="moduleForm">
-            <div class="field">
-              <label>Kurs</label>
-              <select name="course_id" required ${hasCourses ? "" : "disabled"}>
-                ${renderCourseOptions(adminState.courses)}
-              </select>
-            </div>
-            <div class="field"><label>Modul nomi</label><input name="title" required placeholder="1-MODUL: Algebra asoslari" /></div>
-            <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
-            ${hasCourses ? "" : `<p class="empty-hint">Avval kurs yarating.</p>`}
-            <button class="btn success" ${hasCourses ? "" : "disabled"}>Modulni saqlash</button>
-          </form>
-        </section>
-      </aside>
-
-      <section class="admin-stack">
+  if (!adminState.loading && !adminState.me) {
+    renderShell(`
+      <div class="admin-page admin-auth-page">
         ${adminState.error ? `<div class="message error">${escapeHtml(adminState.error)}</div>` : ""}
-        ${adminState.message ? `<div class="message">${escapeHtml(adminState.message)}</div>` : ""}
-        ${
-          adminState.loading
-            ? `<section class="panel pad"><h2>Yuklanmoqda...</h2></section>`
-            : `
+        ${renderAdminAccessPanel()}
+      </div>
+    `, "Admin panel");
+    bindAdminEvents();
+    return;
+  }
+
+  renderShell(`
+    <div class="admin-page">
+      ${adminState.error ? `<div class="message error">${escapeHtml(adminState.error)}</div>` : ""}
+      ${adminState.message ? `<div class="message">${escapeHtml(adminState.message)}</div>` : ""}
+      ${
+        adminState.loading
+          ? `<section class="panel pad"><h2>Yuklanmoqda...</h2></section>`
+          : `
               <section class="stats-grid">
                 ${statCard("📚 Kurslar", summary.courses)}
                 ${statCard("🎬 Darslar", summary.lessons)}
@@ -1233,54 +1304,14 @@ function renderAdmin() {
                 ${statCard("🏆 Natijalar", summary.results)}
               </section>
 
-              <section class="panel pad admin-form-card">
-                <div class="form-title">
-                  <span class="step-badge">3</span>
-                  <div>
-                    <h2>Dars qo'shish</h2>
-                    <p class="muted">Dars modul ichida ochiladi, test foizi keyingi darsni ochadi.</p>
-                  </div>
-                </div>
-                <form class="form-grid" id="lessonForm">
-                  <div class="split">
-                    <div class="field">
-                      <label>Modul</label>
-                      <select name="module_id" required ${hasModules ? "" : "disabled"}>
-                        ${renderModuleOptions(modules)}
-                      </select>
-                    </div>
-                    <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
-                  </div>
-                  <div class="field"><label>Dars nomi</label><input name="title" required placeholder="1-Dars: Chiziqli tenglamalar" /></div>
-                  <div class="field"><label>Video</label><input name="video_url" placeholder="YouTube link yoki bo'sh qoldiring" /></div>
-                  <div class="split">
-                    <div class="field"><label>Vaqt, daqiqa</label><input name="duration_minutes" type="number" value="30" min="1" /></div>
-                    <div class="field"><label>O'tish foizi</label><input name="pass_percent" type="number" value="80" min="1" max="100" /></div>
-                  </div>
-                  ${hasModules ? "" : `<p class="empty-hint">Avval modul yarating.</p>`}
-                  <button class="btn success" ${hasModules ? "" : "disabled"}>Darsni saqlash</button>
-                </form>
+              <section class="admin-create-grid primary-create-grid">
+                ${renderCourseCreatePanel()}
+                ${renderModuleCreatePanel(hasCourses)}
               </section>
 
-              <section class="panel pad admin-form-card">
-                <div class="form-title">
-                  <span class="step-badge">3A</span>
-                  <div>
-                    <h2>Dars videosini yangilash</h2>
-                    <p class="muted">YouTube link kiriting yoki Telegram botda /admin -> Darsga video orqali video fayl yuboring.</p>
-                  </div>
-                </div>
-                <form class="form-grid" id="videoForm">
-                  <div class="field">
-                    <label>Dars</label>
-                    <select name="lesson_id" required ${hasLessons ? "" : "disabled"}>
-                      ${renderLessonOptions(lessons)}
-                    </select>
-                  </div>
-                  <div class="field"><label>Video</label><input name="video_url" required placeholder="https://youtu.be/..." /></div>
-                  ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
-                  <button class="btn success" ${hasLessons ? "" : "disabled"}>Videoni saqlash</button>
-                </form>
+              <section class="admin-create-grid">
+                ${renderLessonCreatePanel(modules, hasModules)}
+                ${renderLessonVideoPanel(lessons, hasLessons)}
               </section>
 
               <section class="panel pad admin-form-card">
@@ -1373,9 +1404,22 @@ function renderAdmin() {
                 <h2>Natijalar</h2>
                 ${renderResultsTable()}
               </section>
+
+              <section class="admin-settings-section">
+                <div class="section-head">
+                  <div>
+                    <h2>Sozlamalar</h2>
+                    <p class="muted">Kam o'zgaradigan karta va admin ma'lumotlari shu yerda turadi.</p>
+                  </div>
+                </div>
+                <div class="admin-settings-grid">
+                  ${renderAdminAccessPanel()}
+                  ${renderPaymentSettingsPanel()}
+                  ${renderAdminUsersPanel()}
+                </div>
+              </section>
             `
-        }
-      </section>
+      }
     </div>
   `, "Admin panel");
 
