@@ -2361,7 +2361,7 @@ class FariksBot:
     def admin_reply_keyboard() -> dict:
         return {
             "keyboard": [
-                [{"text": "📊 Statistika"}, {"text": "📚 Kurslar"}],
+                [{"text": "📊 Statistika"}, {"text": "📚 Admin kurslar"}],
                 [{"text": "➕ Yangi kurs"}, {"text": "🧩 Yangi modul"}],
                 [{"text": "🎬 Yangi dars"}, {"text": "🎥 Darsga video"}],
                 [{"text": "📝 Test savoli"}, {"text": "💳 Karta sozlash"}],
@@ -2370,6 +2370,10 @@ class FariksBot:
             ],
             "resize_keyboard": True,
         }
+
+    @staticmethod
+    def user_menu_texts() -> set[str]:
+        return {"📚 Kurslar", "📖 Mening kurslarim", "👤 Profilim", "💳 To'lovlarim", "🏆 Natijalarim"}
 
     @staticmethod
     def phone_keyboard() -> dict:
@@ -2583,7 +2587,7 @@ class FariksBot:
         if text == "📊 Statistika":
             self.show_admin_stats(chat_id, user_id, from_user)
             return True
-        if text == "📚 Kurslar":
+        if text in {"📚 Admin kurslar", "📚 Kurslar"}:
             self.show_admin_courses(chat_id, user_id, from_user)
             return True
         if text == "➕ Yangi kurs":
@@ -2711,10 +2715,14 @@ class FariksBot:
 
         state, payload = self.db.get_state(user_id)
         if self.is_admin_user(user_id) and state == "admin_menu":
-            if self.handle_admin_menu_text(chat_id, user_id, text, message.get("from", {})):
+            if text in self.user_menu_texts():
+                self.db.clear_state(user_id)
+                state, payload = "", {}
+            else:
+                if self.handle_admin_menu_text(chat_id, user_id, text, message.get("from", {})):
+                    return
+                self.show_admin_panel(chat_id, user_id, message.get("from", {}))
                 return
-            self.show_admin_panel(chat_id, user_id, message.get("from", {}))
-            return
 
         if self.is_admin_user(user_id) and state and state.startswith("admin_"):
             if command == "/cancel":
@@ -2822,6 +2830,7 @@ class FariksBot:
 
     def start(self, chat_id: int, user_id: int) -> None:
         if self.db.get_user(user_id):
+            self.db.clear_state(user_id)
             self.telegram.send_message(chat_id, "Asosiy menyu:", self.main_keyboard(self.is_admin_user(user_id)))
             return
         self.telegram.send_message(
