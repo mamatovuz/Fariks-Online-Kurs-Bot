@@ -1533,7 +1533,7 @@ tr:last-child td {
   font-size: 26px;
 }
 
-.stat-icon {
+.admin-stat-card .stat-icon {
   width: 42px;
   height: 42px;
   display: grid;
@@ -1544,6 +1544,23 @@ tr:last-child td {
   color: var(--green);
   font-size: 15px;
   font-weight: 900;
+}
+
+.admin-data-grid .table-wrap {
+  max-width: 100%;
+}
+
+.admin-data-grid table {
+  table-layout: fixed;
+}
+
+.admin-data-grid th,
+.admin-data-grid td {
+  overflow-wrap: anywhere;
+}
+
+.admin-data-grid td {
+  color: #202b3a;
 }
 
 .admin-section-title {
@@ -1935,7 +1952,7 @@ tr:last-child td {
     font-size: 12px;
   }
 
-  .stat-icon {
+  .admin-stat-card .stat-icon {
     width: 34px;
     height: 34px;
     flex-basis: 34px;
@@ -1981,6 +1998,88 @@ tr:last-child td {
 
   .admin-page .btn {
     min-height: 42px;
+  }
+
+  .admin-layout {
+    padding-bottom: 76px;
+  }
+
+  .admin-data-grid .panel.pad {
+    padding: 14px;
+  }
+
+  .admin-data-grid .table-wrap {
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .admin-data-grid table,
+  .admin-data-grid thead,
+  .admin-data-grid tbody,
+  .admin-data-grid tr,
+  .admin-data-grid th,
+  .admin-data-grid td {
+    display: block;
+  }
+
+  .admin-data-grid table {
+    min-width: 0;
+  }
+
+  .admin-data-grid thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .admin-data-grid tbody {
+    display: grid;
+    gap: 10px;
+  }
+
+  .admin-data-grid tr {
+    border: 1px solid #d8e3ee;
+    border-radius: 8px;
+    background: #fff;
+    overflow: hidden;
+  }
+
+  .admin-data-grid td {
+    min-height: 44px;
+    display: grid;
+    grid-template-columns: minmax(92px, 0.42fr) minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+    padding: 10px 12px;
+    border-bottom: 1px solid #edf2f7;
+  }
+
+  .admin-data-grid td::before {
+    content: attr(data-label);
+    color: #667085;
+    font-size: 12px;
+    font-weight: 900;
+  }
+
+  .admin-data-grid tr:last-child td {
+    border-bottom: 1px solid #edf2f7;
+  }
+
+  .admin-data-grid td:last-child {
+    border-bottom: 0;
+  }
+
+  .admin-data-grid .status-pill {
+    justify-self: start;
+    white-space: normal;
+  }
+
+  .admin-data-grid .action-stack {
+    width: 100%;
   }
 }
 

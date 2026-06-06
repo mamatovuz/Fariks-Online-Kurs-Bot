@@ -1660,10 +1660,10 @@ function renderStudentsTable() {
             .map(
               (student) => `
                 <tr>
-                  <td>${escapeHtml(student.full_name)}</td>
-                  <td>${escapeHtml(student.phone)}</td>
-                  <td>${student.courses_count}</td>
-                  <td>${student.passed_lessons}</td>
+                  <td data-label="Ism">${escapeHtml(student.full_name)}</td>
+                  <td data-label="Telefon">${escapeHtml(student.phone)}</td>
+                  <td data-label="Kurslar">${student.courses_count}</td>
+                  <td data-label="O'tilgan darslar">${student.passed_lessons}</td>
                 </tr>
               `,
             )
@@ -1710,18 +1710,18 @@ function renderPaymentsTable() {
             .map(
               (payment) => `
                 <tr>
-                  <td>
+                  <td data-label="O'quvchi">
                     <strong>${escapeHtml(payment.full_name || "-")}</strong><br />
                     <span class="muted">${escapeHtml(payment.phone || "")}</span>
                   </td>
-                  <td>${escapeHtml(payment.course_title || "-")}</td>
-                  <td>${money(payment.amount)}</td>
-                  <td>
+                  <td data-label="Kurs">${escapeHtml(payment.course_title || "-")}</td>
+                  <td data-label="Summa">${money(payment.amount)}</td>
+                  <td data-label="Status">
                     <span class="status-pill ${paymentStatusClass(payment.status)}">${escapeHtml(paymentStatusLabel(payment.status))}</span>
                     ${payment.rejection_reason ? `<small class="reason-text">Sabab: ${escapeHtml(payment.rejection_reason)}</small>` : ""}
                   </td>
-                  <td>${renderPaymentReceipt(payment)}</td>
-                  <td>
+                  <td data-label="Chek">${renderPaymentReceipt(payment)}</td>
+                  <td data-label="Amal">
                     ${
                       payment.status === "pending_review"
                         ? `<div class="action-stack">
@@ -1752,10 +1752,10 @@ function renderResultsTable() {
             .map(
               (result) => `
                 <tr>
-                  <td>${escapeHtml(result.full_name)}</td>
-                  <td>${escapeHtml(result.lesson_title)}</td>
-                  <td>${result.correct_count}/${result.total_count} - ${result.percent}%</td>
-                  <td>${result.passed ? "O'tdi" : "O'tmadi"}</td>
+                  <td data-label="O'quvchi">${escapeHtml(result.full_name)}</td>
+                  <td data-label="Dars">${escapeHtml(result.lesson_title)}</td>
+                  <td data-label="Natija">${result.correct_count}/${result.total_count} - ${result.percent}%</td>
+                  <td data-label="Holat">${result.passed ? "O'tdi" : "O'tmadi"}</td>
                 </tr>
               `,
             )
