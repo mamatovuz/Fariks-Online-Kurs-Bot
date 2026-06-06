@@ -2640,7 +2640,7 @@ class FariksBot:
                     {"text": "🎥 Darsga video", "callback_data": "admin:add_video"},
                 ],
                 [{"text": "📝 Test savoli qo'shish", "callback_data": "admin:add_question"}],
-                [{"text": "🌐 Web admin panel", "url": link}],
+                [{"text": "🌐 Web admin panel", "web_app": {"url": link}}],
             ]
         }
 
@@ -2859,7 +2859,11 @@ class FariksBot:
             return True
         if text == "🌐 Web admin panel":
             link = self.admin_web_link(user_id, from_user)
-            self.telegram.send_message(chat_id, f"🌐 Web admin panel:\n\n{link}", {"inline_keyboard": [[{"text": "Web panelni ochish", "url": link}]]})
+            self.telegram.send_message(
+                chat_id,
+                "🌐 Web admin panelni Telegram ichida oching.",
+                {"inline_keyboard": [[{"text": "Web panelni ochish", "web_app": {"url": link}}]]},
+            )
             return True
         if text == "🏠 Asosiy menyu":
             self.db.clear_state(user_id)
@@ -3845,6 +3849,8 @@ def make_handler(db: Database, telegram: TelegramClient):
                 content_type += "; charset=utf-8"
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
+            if target.suffix in {".html", ".js", ".css"}:
+                self.send_header("Cache-Control", "no-store, max-age=0")
             self.end_headers()
             self.wfile.write(content)
 

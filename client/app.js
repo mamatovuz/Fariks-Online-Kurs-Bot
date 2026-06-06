@@ -204,9 +204,10 @@ async function initTest() {
 }
 
 function renderShell(content, subtitle = "Online test platformasi") {
+  const isAdmin = subtitle === "Admin panel";
   app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
+    <div class="app-shell ${isAdmin ? "admin-app-shell" : ""}">
+      <header class="topbar ${isAdmin ? "admin-topbar" : ""}">
         <div class="topbar-inner">
           <div class="brand">
             <div class="mark">F</div>
@@ -217,7 +218,7 @@ function renderShell(content, subtitle = "Online test platformasi") {
           </div>
         </div>
       </header>
-      <main class="layout">${content}</main>
+      <main class="layout ${isAdmin ? "admin-layout" : ""}">${content}</main>
     </div>
   `;
 }
@@ -1171,17 +1172,17 @@ function renderAdminAccessPanel() {
     const name = adminState.me?.name || "Admin";
     const login = adminState.me?.login_method === "telegram" ? "Telegram orqali kirildi" : "Admin kabinet";
     return `
-      <section class="panel pad">
+      <section class="panel pad admin-access-panel">
         <h2>Admin kabinet</h2>
         <p class="muted">${escapeHtml(login)}</p>
-        <div class="metric"><span>Admin</span><strong>${escapeHtml(name)}</strong></div>
+        <div class="metric admin-mini-metric"><span>Admin</span><strong>${escapeHtml(name)}</strong></div>
         <button class="btn secondary" id="logoutAdmin">Chiqish</button>
       </section>
     `;
   }
 
   return `
-    <section class="panel pad">
+    <section class="panel pad admin-access-panel">
       <h2>Admin kirish</h2>
       <div class="form-grid">
         <div class="field">
@@ -1415,6 +1416,8 @@ function renderAdmin() {
   const hasCourses = adminState.courses.length > 0;
   const hasModules = modules.length > 0;
   const hasLessons = lessons.length > 0;
+  const adminName = adminState.me?.name || "Admin";
+  const loginLabel = adminState.me?.login_method === "telegram" ? "Telegram login" : "Token login";
 
   if (!adminState.loading && !adminState.me) {
     renderShell(`
@@ -1435,45 +1438,73 @@ function renderAdmin() {
         adminState.loading
           ? `<section class="panel pad"><h2>Yuklanmoqda...</h2></section>`
           : `
-              <section class="stats-grid">
-                ${statCard("📚 Kurslar", summary.courses)}
-                ${statCard("🎬 Darslar", summary.lessons)}
-                ${statCard("👥 O'quvchilar", summary.students)}
-                ${statCard("🏆 Natijalar", summary.results)}
+              <section class="panel pad admin-hero">
+                <div>
+                  <p class="eyebrow">FARIKS Director</p>
+                  <h1>Admin boshqaruvi</h1>
+                  <p class="muted">Kurslar, darslar, testlar va to'lovlar bir joyda.</p>
+                </div>
+                <div class="admin-hero-card">
+                  <span>${escapeHtml(loginLabel)}</span>
+                  <strong>${escapeHtml(adminName)}</strong>
+                </div>
               </section>
 
-              <section class="admin-create-grid primary-create-grid">
+              <section class="stats-grid admin-stats-grid">
+                ${statCard("Kurslar", summary.courses, "K")}
+                ${statCard("Darslar", summary.lessons, "D")}
+                ${statCard("O'quvchilar", summary.students, "O")}
+                ${statCard("Natijalar", summary.results, "N")}
+              </section>
+
+              <div class="admin-section-title">
+                <div>
+                  <h2>Kontent qo'shish</h2>
+                  <p class="muted">Kursdan boshlab dars va PDF testgacha ketma-ket sozlang.</p>
+                </div>
+              </div>
+
+              <section class="admin-create-grid primary-create-grid admin-main-grid">
                 ${renderCourseCreatePanel()}
                 ${renderModuleCreatePanel(hasCourses)}
               </section>
 
-              <section class="admin-create-grid">
+              <section class="admin-create-grid admin-main-grid">
                 ${renderLessonCreatePanel(modules, hasModules)}
                 ${renderLessonVideoPanel(lessons, hasLessons)}
               </section>
 
-              ${renderPdfTestPanel(lessons, hasLessons)}
+              <div class="admin-wide-block">
+                ${renderPdfTestPanel(lessons, hasLessons)}
+              </div>
 
-              <section class="panel pad">
-                <h2>Kurs tuzilmasi</h2>
+              <section class="panel pad admin-wide-panel">
+                <div class="admin-section-title compact">
+                  <div>
+                    <h2>Kurs tuzilmasi</h2>
+                    <p class="muted">Yaratilgan kurs, modul va darslar.</p>
+                  </div>
+                </div>
                 <div class="course-tree">
                   ${adminState.courses.map(renderCourseTree).join("")}
                 </div>
               </section>
 
-              <section class="panel pad">
-                <h2>O'quvchilar</h2>
-                ${renderStudentsTable()}
-              </section>
+              <section class="admin-data-grid">
+                <div class="panel pad">
+                  <h2>O'quvchilar</h2>
+                  ${renderStudentsTable()}
+                </div>
 
-              <section class="panel pad">
-                <h2>To'lovlar</h2>
-                ${renderPaymentsTable()}
-              </section>
+                <div class="panel pad">
+                  <h2>To'lovlar</h2>
+                  ${renderPaymentsTable()}
+                </div>
 
-              <section class="panel pad">
-                <h2>Natijalar</h2>
-                ${renderResultsTable()}
+                <div class="panel pad">
+                  <h2>Natijalar</h2>
+                  ${renderResultsTable()}
+                </div>
               </section>
 
               <section class="admin-settings-section">
@@ -1498,8 +1529,17 @@ function renderAdmin() {
   typeset();
 }
 
-function statCard(label, value) {
-  return `<div class="panel pad metric"><span>${escapeHtml(label)}</span><strong>${Number(value || 0)}</strong></div>`;
+function statCard(label, value, icon = "") {
+  const fallbackIcon = (String(label || "").match(/[A-Za-z0-9]/) || ["F"])[0].toUpperCase();
+  return `
+    <div class="panel pad metric admin-stat-card">
+      <span class="stat-icon">${escapeHtml(icon || fallbackIcon)}</span>
+      <div>
+        <span>${escapeHtml(label)}</span>
+        <strong>${Number(value || 0)}</strong>
+      </div>
+    </div>
+  `;
 }
 
 function renderCourseTree(course, courseIndex) {
