@@ -1296,6 +1296,7 @@ class MongoDatabase:
         self.settings = self.db.settings
         self.admins = self.db.admins
         self.processed_updates = self.db.processed_updates
+        self.subscription_cache = self.db.subscription_cache
         self.ASCENDING = ASCENDING
 
     def _clean(self, doc: dict | None) -> dict | None:
@@ -1338,7 +1339,7 @@ class MongoDatabase:
         except self.duplicate_key_error:
             return False
 
-    def mark_recent_callback(self, user_id: int, data: str, seconds: int = 4) -> bool:
+    def mark_recent_callback(self, user_id: int, data: str, seconds: int = 12) -> bool:
         digest = hashlib.sha256(f"{int(user_id)}:{data}".encode("utf-8")).hexdigest()
         key = f"telegram-callback:{digest}"
         timestamp = int(time.time())
@@ -1356,6 +1357,31 @@ class MongoDatabase:
             return True
         except self.duplicate_key_error:
             return False
+
+    def get_subscription_cache(self, user_id: int, ttl_seconds: int = 600) -> bool | None:
+        row = self._clean(self.subscription_cache.find_one({"_id": int(user_id)}))
+        if not row:
+            return None
+        checked_at = int(row.get("checked_at_ts") or 0)
+        subscribed = bool(row.get("subscribed"))
+        ttl = int(ttl_seconds if subscribed else min(ttl_seconds, 30))
+        if checked_at and int(time.time()) - checked_at <= ttl:
+            return subscribed
+        return None
+
+    def set_subscription_cache(self, user_id: int, subscribed: bool) -> None:
+        self.subscription_cache.update_one(
+            {"_id": int(user_id)},
+            {
+                "$set": {
+                    "user_id": int(user_id),
+                    "subscribed": bool(subscribed),
+                    "checked_at": now_iso(),
+                    "checked_at_ts": int(time.time()),
+                }
+            },
+            upsert=True,
+        )
 
     def _unique_slug(self, collection, title: str) -> str:
         base_slug = slugify(title)
@@ -1410,6 +1436,7 @@ class MongoDatabase:
             (self.results, [("user_id", self.ASCENDING), ("created_at", self.ASCENDING)], {}),
             (self.admins, [("telegram_id", self.ASCENDING)], {"unique": True}),
             (self.processed_updates, [("created_at_ts", self.ASCENDING)], {}),
+            (self.subscription_cache, [("checked_at_ts", self.ASCENDING)], {}),
         ]
         for collection, keys, options in indexes:
             if not self._create_index(collection, keys, **options):
@@ -2555,11 +2582,20 @@ class FariksBot:
     def is_channel_subscribed(self, user_id: int) -> bool:
         if not FORCE_SUBSCRIPTION_CHANNEL:
             return True
+        if hasattr(self.db, "get_subscription_cache"):
+            cached = self.db.get_subscription_cache(user_id)
+            if cached is not None:
+                return cached
         member = self.telegram.get_chat_member(FORCE_SUBSCRIPTION_CHANNEL, user_id)
         if not member:
+            if hasattr(self.db, "set_subscription_cache"):
+                self.db.set_subscription_cache(user_id, False)
             return False
         status = str(member.get("status") or "").lower()
-        return status in {"creator", "administrator", "member"} or bool(member.get("is_member"))
+        subscribed = status in {"creator", "administrator", "member"} or bool(member.get("is_member"))
+        if hasattr(self.db, "set_subscription_cache"):
+            self.db.set_subscription_cache(user_id, subscribed)
+        return subscribed
 
     def send_subscription_gate(self, chat_id: int) -> None:
         self.telegram.send_message(
@@ -2883,7 +2919,7 @@ class FariksBot:
                     self.handle_update(update)
                 except Exception as error:
                     print(f"Update handling error: {error}")
-            time.sleep(0.3)
+            time.sleep(0.05)
 
     def handle_update(self, update: dict) -> None:
         update_id = int(update.get("update_id") or 0)
