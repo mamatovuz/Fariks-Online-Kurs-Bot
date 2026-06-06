@@ -123,7 +123,7 @@ button {
 
 .pdf-test-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-columns: minmax(0, 1fr) 320px;
   gap: 20px;
   align-items: start;
 }
@@ -297,18 +297,9 @@ h3 {
   margin-bottom: 0;
 }
 
-.pdf-tools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-weight: 800;
-  white-space: nowrap;
-}
-
 .pdf-frame {
   width: 100%;
-  height: min(76vh, 840px);
+  height: min(78vh, 860px);
   display: block;
   border: 0;
   background: #eef3f8;
@@ -338,12 +329,12 @@ h3 {
 
 .pdf-options {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .pdf-option {
-  min-height: 58px;
+  min-height: 54px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
@@ -382,6 +373,14 @@ h3 {
   gap: 12px;
   padding: 0;
   border: 0;
+}
+
+.clean-footer {
+  justify-content: flex-end;
+}
+
+.clean-footer .btn {
+  min-width: 150px;
 }
 
 .question-head {
@@ -1550,9 +1549,12 @@ tr:last-child td {
   .split,
   .answer-pair,
   .answer-grid,
-  .preview-options,
-  .pdf-options {
+  .preview-options {
     grid-template-columns: 1fr;
+  }
+
+  .pdf-options {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .pdf-head {

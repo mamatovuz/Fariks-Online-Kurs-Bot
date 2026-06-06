@@ -27,7 +27,6 @@ const testState = {
   current: 0,
   answers: {},
   drafts: {},
-  pdfZoom: 100,
   deadline: 0,
   timer: null,
   notice: "",
@@ -49,6 +48,7 @@ const adminState = {
   results: [],
   settings: { payment: {}, admins: [] },
 };
+let adminMessageTimer = null;
 
 const imageCropState = {
   image: null,
@@ -261,7 +261,6 @@ function renderTest() {
 
         <div class="meta-row">
           <div class="metric"><span>Savollar soni</span><strong>${data.questions.length} ta</strong></div>
-          <div class="metric"><span>Vaqt</span><strong>${data.lesson.duration_minutes} daqiqa</strong></div>
           <div class="metric"><span>O'tish bali</span><strong>${data.lesson.pass_percent}%</strong></div>
         </div>
 
@@ -289,9 +288,7 @@ function startTest() {
   testState.current = 0;
   testState.answers = {};
   testState.drafts = {};
-  testState.pdfZoom = 100;
   testState.notice = "";
-  testState.deadline = Date.now() + testState.payload.lesson.duration_minutes * 60 * 1000;
   renderActiveTest();
 }
 
@@ -317,7 +314,6 @@ function renderActiveTest() {
             <p class="eyebrow">${escapeHtml(data.module.title)}</p>
             <h2>${escapeHtml(data.lesson.title)}</h2>
           </div>
-          <span class="status-pill">${testState.current + 1}/${questions.length}</span>
         </div>
         <div class="progress-track"><div class="progress-bar" style="width:${percent}%"></div></div>
         <div class="question-body">
@@ -338,23 +334,10 @@ function renderActiveTest() {
           </div>
           ${testState.notice ? `<div class="notice">${escapeHtml(testState.notice)}</div>` : ""}
         </div>
-        <div class="question-footer">
-          <div class="button-row">
-            <button class="btn secondary" id="prevQuestion" ${testState.current === 0 ? "disabled" : ""}>Oldingi</button>
-            <button class="btn secondary" id="nextQuestion" ${testState.current === questions.length - 1 ? "disabled" : ""}>Keyingi</button>
-          </div>
-          <div class="finish-wrap">
-            <span class="finish-hint">${canFinish ? "Barcha savollar belgilandi" : `${missingCount} ta savol javobsiz`}</span>
-            <button class="btn success" id="finishTest" ${canFinish ? "" : "disabled"}>Yakunlash</button>
-          </div>
-        </div>
+        ${canFinish ? `<div class="question-footer clean-footer"><button class="btn success" id="finishTest">Yakunlash</button></div>` : ""}
       </section>
 
       <aside class="panel pad side-panel">
-        <div class="timer">
-          <span class="muted">Qolgan vaqt</span>
-          <strong id="timerValue">${formatTime(timeLeft())}</strong>
-        </div>
         <div class="question-map">
           ${questions
             .map((question, index) => {
@@ -377,6 +360,9 @@ function renderActiveTest() {
     button.addEventListener("click", () => {
       testState.answers[current.id] = button.dataset.option;
       testState.notice = "";
+      if (testState.current < questions.length - 1) {
+        testState.current += 1;
+      }
       renderActiveTest();
     });
   });
@@ -387,19 +373,7 @@ function renderActiveTest() {
       renderActiveTest();
     });
   });
-  document.getElementById("prevQuestion").addEventListener("click", () => {
-    testState.current = Math.max(0, testState.current - 1);
-    testState.notice = "";
-    renderActiveTest();
-  });
-  document.getElementById("nextQuestion").addEventListener("click", () => {
-    testState.current = Math.min(questions.length - 1, testState.current + 1);
-    testState.notice = "";
-    renderActiveTest();
-  });
-  document.getElementById("finishTest").addEventListener("click", submitTest);
-
-  testState.timer = setInterval(updateTimer, 1000);
+  document.getElementById("finishTest")?.addEventListener("click", submitTest);
   typeset();
 }
 
@@ -417,7 +391,7 @@ function renderPdfTest() {
   const finalAnswer = testState.answers[currentId] || "";
   const pdfSource = String(data.pdf.url || "");
   const pdfBaseUrl = pdfSource.startsWith("http") ? pdfSource : `${API_BASE}${pdfSource}`;
-  const pdfUrl = `${pdfBaseUrl}#toolbar=0&navpanes=0&zoom=${testState.pdfZoom}`;
+  const pdfUrl = `${pdfBaseUrl}#toolbar=0&navpanes=0`;
 
   renderShell(`
     <div class="pdf-test-grid">
@@ -427,23 +401,13 @@ function renderPdfTest() {
             <p class="eyebrow">${escapeHtml(data.course.title)}</p>
             <h2>${escapeHtml(data.lesson.title)}</h2>
           </div>
-          <div class="pdf-tools">
-            <button class="btn secondary small-btn" id="zoomOut" type="button">-</button>
-            <span>${testState.pdfZoom}%</span>
-            <button class="btn secondary small-btn" id="zoomIn" type="button">+</button>
-          </div>
         </div>
         <iframe class="pdf-frame" src="${escapeHtml(pdfUrl)}" title="${escapeHtml(data.pdf.filename || "Test PDF")}"></iframe>
       </section>
 
       <aside class="panel pad pdf-answer-panel">
-        <div class="timer">
-          <span class="muted">Qolgan vaqt</span>
-          <strong id="timerValue">${formatTime(timeLeft())}</strong>
-        </div>
         <div class="progress-track"><div class="progress-bar" style="width:${percent}%"></div></div>
         <div class="pdf-current">
-          <span class="status-pill">${testState.current + 1}/${questions.length}</span>
           <h2>${current.position}-savol</h2>
           <p class="muted">Variantni bir marta bossangiz sariq, ikkinchi marta bossangiz yashil bo'ladi.</p>
         </div>
@@ -471,16 +435,7 @@ function renderPdfTest() {
             })
             .join("")}
         </div>
-        <div class="question-footer compact-footer">
-          <div class="button-row">
-            <button class="btn secondary" id="prevQuestion" ${testState.current === 0 ? "disabled" : ""}>Oldingi</button>
-            <button class="btn secondary" id="nextQuestion" ${testState.current === questions.length - 1 ? "disabled" : ""}>Keyingi</button>
-          </div>
-          <div class="finish-wrap">
-            <span class="finish-hint">${canFinish ? "Barcha savollar aniq belgilandi" : `${missingCount} ta savol javobsiz`}</span>
-            <button class="btn success" id="finishTest" ${canFinish ? "" : "disabled"}>Yakunlash</button>
-          </div>
-        </div>
+        ${canFinish ? `<div class="question-footer compact-footer clean-footer"><button class="btn success" id="finishTest">Yakunlash</button></div>` : ""}
       </aside>
     </div>
   `);
@@ -513,26 +468,7 @@ function renderPdfTest() {
       renderPdfTest();
     });
   });
-  document.getElementById("prevQuestion").addEventListener("click", () => {
-    testState.current = Math.max(0, testState.current - 1);
-    testState.notice = "";
-    renderPdfTest();
-  });
-  document.getElementById("nextQuestion").addEventListener("click", () => {
-    testState.current = Math.min(questions.length - 1, testState.current + 1);
-    testState.notice = "";
-    renderPdfTest();
-  });
-  document.getElementById("zoomOut").addEventListener("click", () => {
-    testState.pdfZoom = Math.max(70, testState.pdfZoom - 10);
-    renderPdfTest();
-  });
-  document.getElementById("zoomIn").addEventListener("click", () => {
-    testState.pdfZoom = Math.min(180, testState.pdfZoom + 10);
-    renderPdfTest();
-  });
-  document.getElementById("finishTest").addEventListener("click", submitTest);
-  testState.timer = setInterval(updateTimer, 1000);
+  document.getElementById("finishTest")?.addEventListener("click", submitTest);
 }
 
 function timeLeft() {
@@ -659,10 +595,12 @@ async function initAdmin() {
   await loadAdminData();
 }
 
-async function loadAdminData() {
-  adminState.loading = true;
+async function loadAdminData(options = {}) {
+  const silent = Boolean(options.silent);
+  const scrollY = silent ? window.scrollY : 0;
+  if (!silent) adminState.loading = true;
   adminState.error = "";
-  renderAdmin();
+  if (!silent) renderAdmin();
   try {
     const [me, summary, courses, students, payments, results, settings] = await Promise.all([
       apiGet("/api/admin/me", true),
@@ -679,6 +617,25 @@ async function loadAdminData() {
     adminState.loading = false;
   }
   renderAdmin();
+  if (silent) {
+    requestAnimationFrame(() => window.scrollTo(0, scrollY));
+  }
+}
+
+function showAdminMessage(message) {
+  adminState.message = message;
+  clearTimeout(adminMessageTimer);
+  adminMessageTimer = setTimeout(() => {
+    const scrollY = window.scrollY;
+    adminState.message = "";
+    renderAdmin();
+    requestAnimationFrame(() => window.scrollTo(0, scrollY));
+  }, 5000);
+}
+
+async function refreshAdminData(message) {
+  showAdminMessage(message);
+  await loadAdminData({ silent: true });
 }
 
 async function loadLessonQuestions(lessonId) {
@@ -1380,10 +1337,7 @@ function renderLessonCreatePanel(modules, hasModules) {
         </div>
         <div class="field"><label>Dars nomi</label><input name="title" required placeholder="1-Dars: Chiziqli tenglamalar" /></div>
         <div class="field"><label>Video</label><input name="video_url" placeholder="YouTube link yoki bo'sh qoldiring" /></div>
-        <div class="split">
-          <div class="field"><label>Vaqt, daqiqa</label><input name="duration_minutes" type="number" value="30" min="1" /></div>
-          <div class="field"><label>O'tish foizi</label><input name="pass_percent" type="number" value="80" min="1" max="100" /></div>
-        </div>
+        <div class="field"><label>O'tish foizi</label><input name="pass_percent" type="number" value="80" min="1" max="100" /></div>
         ${hasModules ? "" : `<p class="empty-hint">Avval modul yarating.</p>`}
         <button class="btn success" ${hasModules ? "" : "disabled"}>Darsni saqlash</button>
       </form>
@@ -1500,80 +1454,11 @@ function renderAdmin() {
 
               ${renderPdfTestPanel(lessons, hasLessons)}
 
-              <section class="panel pad admin-form-card">
-                <div class="form-title">
-                  <span class="step-badge">4</span>
-                  <div>
-                    <h2>Test savoli qo'shish</h2>
-                    <p class="muted">Asosiy usul: rasm yuklang, test joyini qirqing, javoblarni kiriting.</p>
-                  </div>
-                </div>
-                <form class="form-grid" id="questionForm">
-                  <div class="field">
-                    <label>Dars</label>
-                    <select name="lesson_id" required ${hasLessons ? "" : "disabled"}>
-                      ${renderLessonOptions(lessons)}
-                    </select>
-                  </div>
-                  <div class="field">
-                    <label>Savol matni</label>
-                    <textarea id="questionIntro" name="question_intro" placeholder="Tenglamani yeching. Rasmli savolda bo'sh qoldirish mumkin."></textarea>
-                  </div>
-                  <div class="image-question-builder">
-                    <div class="form-title compact-title">
-                      <div>
-                        <h2>Rasmli savol</h2>
-                        <p class="muted">Rasm yuklang, test turgan joyni belgilang va qirqib oling.</p>
-                      </div>
-                    </div>
-                    <input type="hidden" id="questionImageData" name="image_data" />
-                    <div class="field">
-                      <label>Rasm yuklash</label>
-                      <input id="questionImageInput" type="file" accept="image/*" />
-                    </div>
-                    <div class="cropper-wrap">
-                      <canvas id="imageCropCanvas"></canvas>
-                      <div class="button-row">
-                        <button class="btn secondary" type="button" id="cropQuestionImage">Belgilangan joyni qirqish</button>
-                      </div>
-                    </div>
-                    <div class="cropped-preview" id="croppedImagePreview"></div>
-                  </div>
-                  <div class="answer-composer">
-                    <label>Javobni kasr yoki ildiz bilan yozish</label>
-                    <div class="formula-palette">${renderAnswerFormulaPalette()}</div>
-                    <p class="muted">Belgini A/B/C/D maydoniga torting yoki javob maydonini bosib, belgini tanlang.</p>
-                    <div class="formula-compose-panel" id="formulaComposer" hidden></div>
-                  </div>
-                  <div class="answer-grid">
-                    <div class="field"><label>A variant</label><input name="option_a" required placeholder="4" data-field-label="A variant" data-formula-drop-target /></div>
-                    <div class="field"><label>B variant</label><input name="option_b" required placeholder="5" data-field-label="B variant" data-formula-drop-target /></div>
-                    <div class="field"><label>C variant</label><input name="option_c" required placeholder="8/3" data-field-label="C variant" data-formula-drop-target /></div>
-                    <div class="field"><label>D variant</label><input name="option_d" required placeholder="-1" data-field-label="D variant" data-formula-drop-target /></div>
-                  </div>
-                  <div class="split">
-                    <div class="field">
-                      <label>To'g'ri javob</label>
-                      <select name="correct_option"><option>A</option><option>B</option><option>C</option><option>D</option></select>
-                    </div>
-                    <div class="field"><label>Tartib raqami</label><input name="position" type="number" value="1" min="1" /></div>
-                  </div>
-                  <div class="question-preview" id="questionPreview"></div>
-                  ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
-                  <button class="btn success" ${hasLessons ? "" : "disabled"}>Savolni saqlash</button>
-                </form>
-              </section>
-
               <section class="panel pad">
                 <h2>Kurs tuzilmasi</h2>
                 <div class="course-tree">
                   ${adminState.courses.map(renderCourseTree).join("")}
                 </div>
-              </section>
-
-              <section class="panel pad">
-                <h2>Savollarni boshqarish</h2>
-                ${renderQuestionManager(lessons)}
               </section>
 
               <section class="panel pad">
@@ -1870,7 +1755,7 @@ function bindAdminEvents() {
       localStorage.setItem("fariksAdminToken", adminState.token);
       await loadAdminData();
       if (!adminState.error) {
-        adminState.message = "Admin token saqlandi.";
+        showAdminMessage("Admin token saqlandi.");
         renderAdmin();
       }
     });
@@ -1878,23 +1763,19 @@ function bindAdminEvents() {
 
   bindForm("courseForm", async (data) => {
     await apiPost("/api/admin/courses", data, true);
-    adminState.message = "Kurs qo'shildi.";
-    await loadAdminData();
+    await refreshAdminData("Kurs qo'shildi.");
   });
   bindForm("moduleForm", async (data) => {
     await apiPost("/api/admin/modules", data, true);
-    adminState.message = "Modul qo'shildi.";
-    await loadAdminData();
+    await refreshAdminData("Modul qo'shildi.");
   });
   bindForm("lessonForm", async (data) => {
     await apiPost("/api/admin/lessons", data, true);
-    adminState.message = "Dars qo'shildi.";
-    await loadAdminData();
+    await refreshAdminData("Dars qo'shildi.");
   });
   bindForm("videoForm", async (data) => {
     await apiPost("/api/admin/lessons/video", data, true);
-    adminState.message = "Dars videosi yangilandi.";
-    await loadAdminData();
+    await refreshAdminData("Dars videosi yangilandi.");
   });
   bindForm("pdfTestForm", async (data) => {
     const file = data.pdf_file;
@@ -1911,33 +1792,15 @@ function bindAdminEvents() {
     data.filename = file.name || "fariks-test.pdf";
     delete data.pdf_file;
     await apiPost("/api/admin/lessons/pdf-test", data, true);
-    adminState.message = "PDF test saqlandi.";
-    await loadAdminData();
+    await refreshAdminData("PDF test saqlandi.");
   });
   bindForm("paymentSettingsForm", async (data) => {
     await apiPost("/api/admin/settings/payment", data, true);
-    adminState.message = "Karta ma'lumotlari saqlandi.";
-    await loadAdminData();
+    await refreshAdminData("Karta ma'lumotlari saqlandi.");
   });
   bindForm("adminAddForm", async (data) => {
     await apiPost("/api/admin/admins", data, true);
-    adminState.message = "Admin qo'shildi.";
-    await loadAdminData();
-  });
-  bindForm("questionForm", async (data) => {
-    data.text = buildQuestionText();
-    data.image_data = document.getElementById("questionImageData")?.value || "";
-    if (!data.text && !data.image_data) {
-      throw new Error("Savol matni yozing yoki rasm yuklab qirqib oling.");
-    }
-    delete data.question_intro;
-    await apiPost("/api/admin/questions", data, true);
-    adminState.message = "Savol qo'shildi.";
-    adminState.selectedLessonId = String(data.lesson_id || "");
-    if (adminState.selectedLessonId) {
-      adminState.questions = await apiGet(`/api/admin/questions?lesson_id=${encodeURIComponent(adminState.selectedLessonId)}`, true);
-    }
-    await loadAdminData();
+    await refreshAdminData("Admin qo'shildi.");
   });
   bindImageCropper();
   bindAnswerFormulaPalette();
@@ -1959,11 +1822,11 @@ function bindAdminEvents() {
       if (!confirm("Bu savol o'chirilsinmi?")) return;
       try {
         await apiDelete(`/api/admin/questions/${button.dataset.deleteQuestion}`, true);
-        adminState.message = "Savol o'chirildi.";
+        showAdminMessage("Savol o'chirildi.");
         if (adminState.selectedLessonId) {
           adminState.questions = await apiGet(`/api/admin/questions?lesson_id=${encodeURIComponent(adminState.selectedLessonId)}`, true);
         }
-        await loadAdminData();
+        await loadAdminData({ silent: true });
       } catch (error) {
         adminState.error = error.message;
         renderAdmin();
@@ -1976,10 +1839,10 @@ function bindAdminEvents() {
       if (!confirm("Kurs o'chirilsa, uning modullari, darslari va savollari ham o'chadi. Davom etamizmi?")) return;
       try {
         await apiDelete(`/api/admin/courses/${button.dataset.deleteCourse}`, true);
-        adminState.message = "Kurs o'chirildi.";
+        showAdminMessage("Kurs o'chirildi.");
         adminState.questions = [];
         adminState.selectedLessonId = "";
-        await loadAdminData();
+        await loadAdminData({ silent: true });
       } catch (error) {
         adminState.error = error.message;
         renderAdmin();
@@ -1992,8 +1855,7 @@ function bindAdminEvents() {
       if (!confirm("Bu admin o'chirilsinmi?")) return;
       try {
         await apiDelete(`/api/admin/admins/${button.dataset.deleteAdmin}`, true);
-        adminState.message = "Admin o'chirildi.";
-        await loadAdminData();
+        await refreshAdminData("Admin o'chirildi.");
       } catch (error) {
         adminState.error = error.message;
         renderAdmin();
@@ -2006,8 +1868,7 @@ function bindAdminEvents() {
       if (!confirm("To'lov tasdiqlansinmi?")) return;
       try {
         await apiPost("/api/admin/payments/approve", { payment_id: button.dataset.approvePayment }, true);
-        adminState.message = "To'lov tasdiqlandi.";
-        await loadAdminData();
+        await refreshAdminData("To'lov tasdiqlandi.");
       } catch (error) {
         adminState.error = error.message;
         renderAdmin();
@@ -2021,8 +1882,7 @@ function bindAdminEvents() {
       if (!reason) return;
       try {
         await apiPost("/api/admin/payments/reject", { payment_id: button.dataset.rejectPayment, reason }, true);
-        adminState.message = "To'lov rad etildi.";
-        await loadAdminData();
+        await refreshAdminData("To'lov rad etildi.");
       } catch (error) {
         adminState.error = error.message;
         renderAdmin();
