@@ -1,4 +1,9 @@
 const app = document.getElementById("app");
+const telegramWebApp = window.Telegram?.WebApp;
+if (telegramWebApp) {
+  telegramWebApp.ready();
+  telegramWebApp.expand();
+}
 const params = new URLSearchParams(window.location.search);
 const apiUrlParam = (params.get("api") || "").replace(/\/+$/, "");
 if (apiUrlParam) {

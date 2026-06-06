@@ -1256,13 +1256,14 @@ class MongoDatabase:
     def __init__(self, _path: Path | None = None):
         try:
             from pymongo import ASCENDING, MongoClient, ReturnDocument
-            from pymongo.errors import OperationFailure
+            from pymongo.errors import DuplicateKeyError, OperationFailure
             import gridfs
             from bson import ObjectId
         except ImportError as error:
             raise RuntimeError("MongoDB uchun `pymongo[srv]` dependency o'rnatilishi kerak.") from error
 
         self.return_after = ReturnDocument.AFTER
+        self.duplicate_key_error = DuplicateKeyError
         self.operation_failure = OperationFailure
         self.object_id = ObjectId
         self.create_indexes = clean_env("MONGODB_CREATE_INDEXES", "1").lower() not in {"0", "false", "no"}
@@ -1294,6 +1295,7 @@ class MongoDatabase:
         self.counters = self.db.counters
         self.settings = self.db.settings
         self.admins = self.db.admins
+        self.processed_updates = self.db.processed_updates
         self.ASCENDING = ASCENDING
 
     def _clean(self, doc: dict | None) -> dict | None:
@@ -1319,6 +1321,41 @@ class MongoDatabase:
         row = collection.find_one(sort=[("id", -1)])
         max_id = int(row["id"]) if row else 0
         self.counters.update_one({"_id": name}, {"$max": {"seq": max_id}}, upsert=True)
+
+    def mark_update_processed(self, update_id: int) -> bool:
+        try:
+            self.processed_updates.insert_one(
+                {
+                    "_id": f"telegram-update:{int(update_id)}",
+                    "update_id": int(update_id),
+                    "created_at": now_iso(),
+                    "created_at_ts": int(time.time()),
+                }
+            )
+            cutoff = int(time.time()) - 3 * 24 * 60 * 60
+            self.processed_updates.delete_many({"created_at_ts": {"$lt": cutoff}})
+            return True
+        except self.duplicate_key_error:
+            return False
+
+    def mark_recent_callback(self, user_id: int, data: str, seconds: int = 4) -> bool:
+        digest = hashlib.sha256(f"{int(user_id)}:{data}".encode("utf-8")).hexdigest()
+        key = f"telegram-callback:{digest}"
+        timestamp = int(time.time())
+        cutoff = timestamp - int(seconds)
+        updated = self.processed_updates.update_one(
+            {"_id": key, "created_at_ts": {"$lt": cutoff}},
+            {"$set": {"user_id": int(user_id), "data": data, "created_at": now_iso(), "created_at_ts": timestamp}},
+        )
+        if updated.matched_count:
+            return True
+        try:
+            self.processed_updates.insert_one(
+                {"_id": key, "user_id": int(user_id), "data": data, "created_at": now_iso(), "created_at_ts": timestamp}
+            )
+            return True
+        except self.duplicate_key_error:
+            return False
 
     def _unique_slug(self, collection, title: str) -> str:
         base_slug = slugify(title)
@@ -1372,6 +1409,7 @@ class MongoDatabase:
             (self.results, [("id", self.ASCENDING)], {"unique": True}),
             (self.results, [("user_id", self.ASCENDING), ("created_at", self.ASCENDING)], {}),
             (self.admins, [("telegram_id", self.ASCENDING)], {"unique": True}),
+            (self.processed_updates, [("created_at_ts", self.ASCENDING)], {}),
         ]
         for collection, keys, options in indexes:
             if not self._create_index(collection, keys, **options):
@@ -2848,6 +2886,9 @@ class FariksBot:
             time.sleep(0.3)
 
     def handle_update(self, update: dict) -> None:
+        update_id = int(update.get("update_id") or 0)
+        if update_id and hasattr(self.db, "mark_update_processed") and not self.db.mark_update_processed(update_id):
+            return
         if "callback_query" in update:
             self.handle_callback(update["callback_query"])
             return
@@ -2954,6 +2995,9 @@ class FariksBot:
                 self.start(chat_id, user_id)
             else:
                 self.send_subscription_gate(chat_id)
+            return
+
+        if hasattr(self.db, "mark_recent_callback") and not self.db.mark_recent_callback(user_id, data):
             return
 
         if not self.ensure_subscription(chat_id, user_id):
@@ -3542,7 +3586,18 @@ class FariksBot:
             self.telegram.send_message(chat_id, str(error))
             return
         link = public_link(f"/test/{lesson['slug']}", {"token": token})
-        self.telegram.send_message(chat_id, f"🔗 Testni boshlash:\n\n{link}")
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🧪 Testni Telegram ichida ochish", "web_app": {"url": link}}],
+            ]
+        }
+        self.telegram.send_message(
+            chat_id,
+            "🧪 <b>Test tayyor</b>\n\n"
+            f"Dars: <b>{html.escape(lesson['title'])}</b>\n\n"
+            "Quyidagi tugma orqali test Telegram Mini App ichida ochiladi.",
+            keyboard,
+        )
 
     def show_profile(self, chat_id: int, user_id: int) -> None:
         user = self.db.get_user(user_id)
