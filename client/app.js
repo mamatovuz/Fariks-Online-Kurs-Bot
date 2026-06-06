@@ -21,6 +21,8 @@ const testState = {
   status: "loading",
   current: 0,
   answers: {},
+  drafts: {},
+  pdfZoom: 100,
   deadline: 0,
   timer: null,
   notice: "",
@@ -281,13 +283,20 @@ function startTest() {
   testState.status = "active";
   testState.current = 0;
   testState.answers = {};
+  testState.drafts = {};
+  testState.pdfZoom = 100;
   testState.notice = "";
   testState.deadline = Date.now() + testState.payload.lesson.duration_minutes * 60 * 1000;
   renderActiveTest();
 }
 
 function renderActiveTest() {
+  clearInterval(testState.timer);
   const data = testState.payload;
+  if (data.test_mode === "pdf") {
+    renderPdfTest();
+    return;
+  }
   const questions = data.questions;
   const current = questions[testState.current];
   const answeredCount = Object.keys(testState.answers).length;
@@ -387,6 +396,138 @@ function renderActiveTest() {
 
   testState.timer = setInterval(updateTimer, 1000);
   typeset();
+}
+
+function renderPdfTest() {
+  clearInterval(testState.timer);
+  const data = testState.payload;
+  const questions = data.questions;
+  const current = questions[testState.current];
+  const answeredCount = Object.keys(testState.answers).length;
+  const missingCount = questions.length - answeredCount;
+  const canFinish = missingCount === 0;
+  const percent = Math.round((answeredCount * 100) / questions.length);
+  const currentId = String(current.id);
+  const draft = testState.drafts[currentId] || "";
+  const finalAnswer = testState.answers[currentId] || "";
+  const pdfSource = String(data.pdf.url || "");
+  const pdfBaseUrl = pdfSource.startsWith("http") ? pdfSource : `${API_BASE}${pdfSource}`;
+  const pdfUrl = `${pdfBaseUrl}#toolbar=0&navpanes=0&zoom=${testState.pdfZoom}`;
+
+  renderShell(`
+    <div class="pdf-test-grid">
+      <section class="panel pdf-panel">
+        <div class="pdf-head">
+          <div>
+            <p class="eyebrow">${escapeHtml(data.course.title)}</p>
+            <h2>${escapeHtml(data.lesson.title)}</h2>
+          </div>
+          <div class="pdf-tools">
+            <button class="btn secondary small-btn" id="zoomOut" type="button">-</button>
+            <span>${testState.pdfZoom}%</span>
+            <button class="btn secondary small-btn" id="zoomIn" type="button">+</button>
+          </div>
+        </div>
+        <iframe class="pdf-frame" src="${escapeHtml(pdfUrl)}" title="${escapeHtml(data.pdf.filename || "Test PDF")}"></iframe>
+      </section>
+
+      <aside class="panel pad pdf-answer-panel">
+        <div class="timer">
+          <span class="muted">Qolgan vaqt</span>
+          <strong id="timerValue">${formatTime(timeLeft())}</strong>
+        </div>
+        <div class="progress-track"><div class="progress-bar" style="width:${percent}%"></div></div>
+        <div class="pdf-current">
+          <span class="status-pill">${testState.current + 1}/${questions.length}</span>
+          <h2>${current.position}-savol</h2>
+          <p class="muted">Variantni bir marta bossangiz sariq, ikkinchi marta bossangiz yashil bo'ladi.</p>
+        </div>
+        <div class="pdf-options">
+          ${["A", "B", "C", "D"]
+            .map((key) => {
+              const stateClass = finalAnswer === key ? " final" : draft === key ? " draft" : "";
+              return `<button class="pdf-option${stateClass}" type="button" data-pdf-option="${key}">${key}</button>`;
+            })
+            .join("")}
+        </div>
+        ${testState.notice ? `<div class="notice">${escapeHtml(testState.notice)}</div>` : ""}
+        <div class="question-map pdf-map">
+          ${questions
+            .map((question, index) => {
+              const qid = String(question.id);
+              const classes = [
+                "q-dot",
+                index === testState.current ? "current" : "",
+                testState.answers[qid] ? "answered" : testState.drafts[qid] ? "drafted" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return `<button class="${classes}" data-goto="${index}">${index + 1}</button>`;
+            })
+            .join("")}
+        </div>
+        <div class="question-footer compact-footer">
+          <div class="button-row">
+            <button class="btn secondary" id="prevQuestion" ${testState.current === 0 ? "disabled" : ""}>Oldingi</button>
+            <button class="btn secondary" id="nextQuestion" ${testState.current === questions.length - 1 ? "disabled" : ""}>Keyingi</button>
+          </div>
+          <div class="finish-wrap">
+            <span class="finish-hint">${canFinish ? "Barcha savollar aniq belgilandi" : `${missingCount} ta savol javobsiz`}</span>
+            <button class="btn success" id="finishTest" ${canFinish ? "" : "disabled"}>Yakunlash</button>
+          </div>
+        </div>
+      </aside>
+    </div>
+  `);
+
+  document.querySelectorAll("[data-pdf-option]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.pdfOption;
+      if (testState.answers[currentId] === key) {
+        testState.notice = "";
+        return;
+      }
+      if (testState.drafts[currentId] === key) {
+        testState.answers[currentId] = key;
+        testState.notice = "";
+        if (testState.current < questions.length - 1) {
+          testState.current += 1;
+        }
+      } else {
+        testState.drafts[currentId] = key;
+        delete testState.answers[currentId];
+        testState.notice = "Variant sariq belgilandi. Aniq javob qilish uchun yana bir marta bosing.";
+      }
+      renderPdfTest();
+    });
+  });
+  document.querySelectorAll("[data-goto]").forEach((button) => {
+    button.addEventListener("click", () => {
+      testState.current = Number(button.dataset.goto);
+      testState.notice = "";
+      renderPdfTest();
+    });
+  });
+  document.getElementById("prevQuestion").addEventListener("click", () => {
+    testState.current = Math.max(0, testState.current - 1);
+    testState.notice = "";
+    renderPdfTest();
+  });
+  document.getElementById("nextQuestion").addEventListener("click", () => {
+    testState.current = Math.min(questions.length - 1, testState.current + 1);
+    testState.notice = "";
+    renderPdfTest();
+  });
+  document.getElementById("zoomOut").addEventListener("click", () => {
+    testState.pdfZoom = Math.max(70, testState.pdfZoom - 10);
+    renderPdfTest();
+  });
+  document.getElementById("zoomIn").addEventListener("click", () => {
+    testState.pdfZoom = Math.min(180, testState.pdfZoom + 10);
+    renderPdfTest();
+  });
+  document.getElementById("finishTest").addEventListener("click", submitTest);
+  testState.timer = setInterval(updateTimer, 1000);
 }
 
 function timeLeft() {
@@ -1270,6 +1411,44 @@ function renderLessonVideoPanel(lessons, hasLessons) {
   `;
 }
 
+function renderPdfTestPanel(lessons, hasLessons) {
+  return `
+    <section class="panel pad admin-form-card">
+      <div class="form-title">
+        <span class="step-badge">PDF</span>
+        <div>
+          <h2>PDF test yuklash</h2>
+          <p class="muted">Kitobdagi test sahifasini PDF qilib yuklang va javob kalitini 1 A, 2 C formatida yozing.</p>
+        </div>
+      </div>
+      <form class="form-grid" id="pdfTestForm">
+        <div class="split">
+          <div class="field">
+            <label>Dars</label>
+            <select name="lesson_id" required ${hasLessons ? "" : "disabled"}>
+              ${renderLessonOptions(lessons)}
+            </select>
+          </div>
+          <div class="field">
+            <label>Savollar soni</label>
+            <input name="question_count" type="number" min="1" max="300" required placeholder="70" />
+          </div>
+        </div>
+        <div class="field">
+          <label>PDF fayl</label>
+          <input name="pdf_file" type="file" accept="application/pdf" required ${hasLessons ? "" : "disabled"} />
+        </div>
+        <div class="field">
+          <label>Javob kaliti</label>
+          <textarea name="answer_key" required placeholder="1 A&#10;2 C&#10;3 D&#10;4 B"></textarea>
+        </div>
+        ${hasLessons ? "" : `<p class="empty-hint">Avval dars yarating.</p>`}
+        <button class="btn success" ${hasLessons ? "" : "disabled"}>PDF testni saqlash</button>
+      </form>
+    </section>
+  `;
+}
+
 function renderAdmin() {
   const summary = adminState.summary || {};
   const modules = allModules();
@@ -1313,6 +1492,8 @@ function renderAdmin() {
                 ${renderLessonCreatePanel(modules, hasModules)}
                 ${renderLessonVideoPanel(lessons, hasLessons)}
               </section>
+
+              ${renderPdfTestPanel(lessons, hasLessons)}
 
               <section class="panel pad admin-form-card">
                 <div class="form-title">
@@ -1464,7 +1645,7 @@ function renderCourseTree(course, courseIndex) {
                                         <span class="mini-badge light">${lessonIndex + 1}</span>
                                         <div>
                                           <strong>${escapeHtml(cleanNumberedTitle(lesson.title))}</strong>
-                                          <span>${lesson.question_count} savol</span>
+                                          <span>${lesson.test_mode === "pdf" ? "PDF test" : "Oddiy test"} · ${lesson.question_count} savol</span>
                                         </div>
                                       </div>
                                       ${renderLessonVideoPreview(lesson.video_url, lesson.title)}
@@ -1655,6 +1836,15 @@ function renderResultsTable() {
   `;
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Faylni o'qib bo'lmadi."));
+    reader.readAsDataURL(file);
+  });
+}
+
 function bindAdminEvents() {
   const logoutAdmin = document.getElementById("logoutAdmin");
   if (logoutAdmin) {
@@ -1699,6 +1889,24 @@ function bindAdminEvents() {
   bindForm("videoForm", async (data) => {
     await apiPost("/api/admin/lessons/video", data, true);
     adminState.message = "Dars videosi yangilandi.";
+    await loadAdminData();
+  });
+  bindForm("pdfTestForm", async (data) => {
+    const file = data.pdf_file;
+    if (!(file instanceof File) || !file.size) {
+      throw new Error("PDF fayl yuklang.");
+    }
+    if (file.type && file.type !== "application/pdf") {
+      throw new Error("Faqat PDF fayl yuklang.");
+    }
+    if (file.size > 14 * 1024 * 1024) {
+      throw new Error("PDF hajmi 14 MB dan kichik bo'lishi kerak.");
+    }
+    data.pdf_data = await fileToDataUrl(file);
+    data.filename = file.name || "fariks-test.pdf";
+    delete data.pdf_file;
+    await apiPost("/api/admin/lessons/pdf-test", data, true);
+    adminState.message = "PDF test saqlandi.";
     await loadAdminData();
   });
   bindForm("paymentSettingsForm", async (data) => {

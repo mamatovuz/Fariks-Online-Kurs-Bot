@@ -98,6 +98,11 @@ ADMIN_TOKEN = clean_env("ADMIN_TOKEN", "change-me")
 APP_SECRET = clean_env("APP_SECRET") or ADMIN_TOKEN or BOT_TOKEN or "fariks-lms-dev-secret"
 DEFAULT_PAYMENT_CARD_NUMBER = clean_env("PAYMENT_CARD_NUMBER", "0000 0000 0000 0000")
 DEFAULT_PAYMENT_CARD_HOLDER = clean_env("PAYMENT_CARD_HOLDER", "FARIKS O'quv Markazi")
+FORCE_SUBSCRIPTION_CHANNEL = clean_env("FORCE_SUBSCRIPTION_CHANNEL", "@fariks01").strip()
+FORCE_SUBSCRIPTION_URL = clean_env(
+    "FORCE_SUBSCRIPTION_URL",
+    f"https://t.me/{FORCE_SUBSCRIPTION_CHANNEL.lstrip('@')}" if FORCE_SUBSCRIPTION_CHANNEL else "",
+)
 ADMIN_TELEGRAM_IDS = {
     int(item)
     for item in re.split(r"[,\s]+", clean_env("ADMIN_TELEGRAM_IDS") or clean_env("ADMIN_TELEGRAM_ID") or ADMIN_TOKEN)
@@ -213,6 +218,40 @@ def is_direct_video_url(value: str) -> bool:
     parsed = urllib.parse.urlparse(str(value or ""))
     path = parsed.path.lower()
     return parsed.scheme in {"http", "https"} and path.endswith((".mp4", ".mov", ".m4v", ".webm"))
+
+
+def parse_answer_key(value: str, question_count: int) -> dict[str, str]:
+    text = str(value or "").upper()
+    question_count = int(question_count or 0)
+    if question_count <= 0:
+        raise ValueError("Savollar sonini to'g'ri kiriting")
+    pairs = re.findall(r"(?<!\d)(\d{1,4})\s*[\).:\-]?\s*([ABCD])\b", text)
+    answers: dict[str, str] = {}
+    for number_raw, option in pairs:
+        number = int(number_raw)
+        if 1 <= number <= question_count:
+            answers[str(number)] = option
+    missing = [str(number) for number in range(1, question_count + 1) if str(number) not in answers]
+    if missing:
+        preview = ", ".join(missing[:12])
+        suffix = "..." if len(missing) > 12 else ""
+        raise ValueError(f"Javob kalitida {preview}{suffix} savollar yo'q")
+    return answers
+
+
+def decode_pdf_data_url(value: str) -> bytes:
+    raw = str(value or "").strip()
+    if not raw.startswith("data:application/pdf;base64,"):
+        raise ValueError("PDF fayl noto'g'ri formatda")
+    try:
+        data = base64.b64decode(raw.split(",", 1)[1], validate=True)
+    except Exception as error:
+        raise ValueError("PDF faylni o'qib bo'lmadi") from error
+    if not data.startswith(b"%PDF"):
+        raise ValueError("Yuklangan fayl PDF emas")
+    if len(data) > 14_000_000:
+        raise ValueError("PDF hajmi juda katta. 14 MB dan kichik PDF yuklang.")
+    return data
 
 
 def slugify(value: str) -> str:
@@ -1063,7 +1102,7 @@ class Database:
         counts = {item["lesson_id"]: item["total"] for item in question_counts}
         lessons_by_module: dict[int, list[dict]] = {}
         for lesson in lessons:
-            lesson["question_count"] = counts.get(lesson["id"], 0)
+            lesson["question_count"] = int(lesson.get("pdf_question_count") or counts.get(lesson["id"], 0))
             lessons_by_module.setdefault(lesson["module_id"], []).append(lesson)
         modules_by_course: dict[int, list[dict]] = {}
         for module in modules:
@@ -1218,11 +1257,14 @@ class MongoDatabase:
         try:
             from pymongo import ASCENDING, MongoClient, ReturnDocument
             from pymongo.errors import OperationFailure
+            import gridfs
+            from bson import ObjectId
         except ImportError as error:
             raise RuntimeError("MongoDB uchun `pymongo[srv]` dependency o'rnatilishi kerak.") from error
 
         self.return_after = ReturnDocument.AFTER
         self.operation_failure = OperationFailure
+        self.object_id = ObjectId
         self.create_indexes = clean_env("MONGODB_CREATE_INDEXES", "1").lower() not in {"0", "false", "no"}
         database_url = clean_env("DATABASE_URL")
         self.uri = (
@@ -1236,6 +1278,7 @@ class MongoDatabase:
         self.client = MongoClient(self.uri, serverSelectionTimeoutMS=8000)
         self.client.admin.command("ping")
         self.db = self.client[self.db_name]
+        self.fs = gridfs.GridFS(self.db)
 
         self.users = self.db.users
         self.user_states = self.db.user_states
@@ -1848,6 +1891,35 @@ class MongoDatabase:
             questions.append(item)
         return questions
 
+    @staticmethod
+    def pdf_test_questions(lesson: dict, include_correct: bool = False) -> list[dict]:
+        count = int(lesson.get("pdf_question_count") or 0)
+        answer_key = lesson.get("pdf_answer_key") or {}
+        questions = []
+        for position in range(1, count + 1):
+            item = {
+                "id": position,
+                "text": "",
+                "image_data": "",
+                "position": position,
+                "options": {"A": "A", "B": "B", "C": "C", "D": "D"},
+            }
+            if include_correct:
+                item["correct_option"] = str(answer_key.get(str(position), "")).upper()
+                item["explanation"] = ""
+            questions.append(item)
+        return questions
+
+    def get_lesson_pdf_file(self, lesson_id: int):
+        lesson = self.get_lesson(int(lesson_id))
+        file_id = lesson.get("pdf_file_id") if lesson else ""
+        if not file_id:
+            raise ValueError("Bu dars uchun PDF test topilmadi")
+        try:
+            return self.fs.get(self.object_id(file_id)), lesson
+        except Exception as error:
+            raise ValueError("PDF fayl topilmadi") from error
+
     def create_test_token(self, user_id: int, lesson_id: int) -> str:
         if not self.is_lesson_unlocked(user_id, lesson_id):
             raise ValueError("Bu dars hali ochilmagan")
@@ -1922,7 +1994,9 @@ class MongoDatabase:
 
     def get_test_payload(self, token: str, lesson_slug: str) -> dict:
         token_data = self.validate_token(token, lesson_slug)
-        questions = self.get_questions(token_data["lesson_id"], include_correct=False)
+        lesson = self.get_lesson(token_data["lesson_id"]) or {}
+        is_pdf_test = lesson.get("test_mode") == "pdf" and int(lesson.get("pdf_question_count") or 0) > 0
+        questions = self.pdf_test_questions(lesson, include_correct=False) if is_pdf_test else self.get_questions(token_data["lesson_id"], include_correct=False)
         return {
             "user": {"telegram_id": token_data["user_id"], "full_name": token_data["full_name"], "phone": token_data["phone"]},
             "course": {"id": token_data["course_id"], "title": token_data["course_title"]},
@@ -1934,6 +2008,13 @@ class MongoDatabase:
                 "duration_minutes": token_data["duration_minutes"],
                 "pass_percent": token_data["pass_percent"],
             },
+            "test_mode": "pdf" if is_pdf_test else "questions",
+            "pdf": {
+                "url": f"/api/test-pdf/{urllib.parse.quote(token_data['slug'])}?token={urllib.parse.quote(token)}",
+                "filename": lesson.get("pdf_filename", "fariks-test.pdf"),
+            }
+            if is_pdf_test
+            else None,
             "questions": questions,
         }
 
@@ -1941,7 +2022,9 @@ class MongoDatabase:
         token_data = self.validate_token(token)
         lesson_id = int(token_data["lesson_id"])
         user_id = int(token_data["user_id"])
-        questions = self.get_questions(lesson_id, include_correct=True)
+        lesson = self.get_lesson(lesson_id) or {}
+        is_pdf_test = lesson.get("test_mode") == "pdf" and int(lesson.get("pdf_question_count") or 0) > 0
+        questions = self.pdf_test_questions(lesson, include_correct=True) if is_pdf_test else self.get_questions(lesson_id, include_correct=True)
         if not questions:
             raise ValueError("Bu dars uchun savollar topilmadi")
         answer_map = {str(key): str(value).upper() for key, value in answers.items()}
@@ -2181,6 +2264,37 @@ class MongoDatabase:
             raise ValueError("Dars topilmadi")
         return self.get_lesson(lesson_id)
 
+    def admin_update_lesson_pdf_test(self, data: dict) -> dict:
+        lesson_id = int(data.get("lesson_id") or 0)
+        question_count = int(data.get("question_count") or 0)
+        answer_key = parse_answer_key(str(data.get("answer_key") or ""), question_count)
+        pdf_data = str(data.get("pdf_data") or "").strip()
+        filename = str(data.get("filename") or "fariks-test.pdf").strip() or "fariks-test.pdf"
+        lesson = self.get_lesson(lesson_id)
+        if not lesson:
+            raise ValueError("Dars topilmadi")
+        update = {
+            "test_mode": "pdf",
+            "pdf_question_count": question_count,
+            "pdf_answer_key": answer_key,
+            "pdf_filename": filename,
+            "updated_at": now_iso(),
+        }
+        if pdf_data:
+            raw_pdf = decode_pdf_data_url(pdf_data)
+            old_file_id = lesson.get("pdf_file_id")
+            file_id = self.fs.put(raw_pdf, filename=filename, content_type="application/pdf", lesson_id=lesson_id, created_at=now_iso())
+            update["pdf_file_id"] = str(file_id)
+            if old_file_id:
+                try:
+                    self.fs.delete(self.object_id(old_file_id))
+                except Exception:
+                    pass
+        elif not lesson.get("pdf_file_id"):
+            raise ValueError("PDF fayl yuklang")
+        self.lessons.update_one({"id": lesson_id}, {"$set": update})
+        return self.get_lesson(lesson_id)
+
     def admin_next_question_position(self, lesson_id: int) -> int:
         row = self.questions.find_one({"lesson_id": int(lesson_id)}, sort=[("position", -1), ("id", -1)])
         return int(row.get("position") or 0) + 1 if row else 1
@@ -2310,6 +2424,14 @@ class TelegramClient:
         if not result.get("ok") and caption:
             self.send_message(chat_id, caption, reply_markup)
 
+    def get_chat_member(self, chat_id: str, user_id: int) -> dict | None:
+        if not chat_id:
+            return None
+        result = self.request("getChatMember", {"chat_id": chat_id, "user_id": user_id})
+        if result.get("ok"):
+            return result.get("result") or {}
+        return None
+
     def download_file_data_url(self, file_id: str, default_mime: str = "image/jpeg") -> str:
         result = self.request("getFile", {"file_id": file_id}, timeout=20)
         if not result.get("ok"):
@@ -2382,6 +2504,39 @@ class FariksBot:
             "resize_keyboard": True,
             "one_time_keyboard": True,
         }
+
+    @staticmethod
+    def subscription_keyboard() -> dict:
+        return {
+            "inline_keyboard": [
+                [{"text": "📢 Kanalga obuna bo'lish", "url": FORCE_SUBSCRIPTION_URL or "https://t.me/fariks01"}],
+                [{"text": "✅ Obunani tekshirish", "callback_data": "check_subscription"}],
+            ]
+        }
+
+    def is_channel_subscribed(self, user_id: int) -> bool:
+        if not FORCE_SUBSCRIPTION_CHANNEL:
+            return True
+        member = self.telegram.get_chat_member(FORCE_SUBSCRIPTION_CHANNEL, user_id)
+        if not member:
+            return False
+        status = str(member.get("status") or "").lower()
+        return status in {"creator", "administrator", "member"} or bool(member.get("is_member"))
+
+    def send_subscription_gate(self, chat_id: int) -> None:
+        self.telegram.send_message(
+            chat_id,
+            "📢 Botdan foydalanish uchun avval FARIKS kanaliga obuna bo'ling.\n\n"
+            f"Kanal: <b>{html.escape(FORCE_SUBSCRIPTION_CHANNEL or '@fariks01')}</b>\n\n"
+            "Obuna bo'lgach, <b>✅ Obunani tekshirish</b> tugmasini bosing.",
+            self.subscription_keyboard(),
+        )
+
+    def ensure_subscription(self, chat_id: int, user_id: int) -> bool:
+        if self.is_channel_subscribed(user_id):
+            return True
+        self.send_subscription_gate(chat_id)
+        return False
 
     def is_admin_user(self, user_id: int) -> bool:
         return self.db.is_admin_user(user_id)
@@ -2705,12 +2860,15 @@ class FariksBot:
         text = str(message.get("text", "")).strip()
         command = text.split()[0].split("@")[0] if text.startswith("/") else ""
 
-        if command == "/admin":
-            self.handle_admin_command(chat_id, user_id, message.get("from", {}))
-            return
-
         if command == "/start":
             self.start(chat_id, user_id)
+            return
+
+        if not self.ensure_subscription(chat_id, user_id):
+            return
+
+        if command == "/admin":
+            self.handle_admin_command(chat_id, user_id, message.get("from", {}))
             return
 
         state, payload = self.db.get_state(user_id)
@@ -2790,6 +2948,17 @@ class FariksBot:
         chat_id = int(callback["message"]["chat"]["id"])
         self.telegram.answer_callback(callback_id)
 
+        if data == "check_subscription":
+            if self.is_channel_subscribed(user_id):
+                self.telegram.send_message(chat_id, "✅ Obuna tasdiqlandi.")
+                self.start(chat_id, user_id)
+            else:
+                self.send_subscription_gate(chat_id)
+            return
+
+        if not self.ensure_subscription(chat_id, user_id):
+            return
+
         if data == "register":
             self.db.set_state(user_id, "awaiting_name")
             self.telegram.send_message(chat_id, "Ism familiyangizni kiriting.")
@@ -2829,6 +2998,8 @@ class FariksBot:
             self.send_test_link(chat_id, user_id, lesson_id)
 
     def start(self, chat_id: int, user_id: int) -> None:
+        if not self.ensure_subscription(chat_id, user_id):
+            return
         if self.db.get_user(user_id):
             self.db.clear_state(user_id)
             self.telegram.send_message(chat_id, "Asosiy menyu:", self.main_keyboard(self.is_admin_user(user_id)))
@@ -3451,6 +3622,25 @@ def make_handler(db: Database, telegram: TelegramClient):
                     self.send_json({"ok": True, "data": payload})
                     return
 
+                if path.startswith("/api/test-pdf/"):
+                    lesson_slug = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+                    token = query.get("token", [""])[0]
+                    if not token:
+                        self.send_json({"ok": False, "error": "Token kerak"}, status=400)
+                        return
+                    token_data = db.validate_token(token, lesson_slug)
+                    pdf_file, lesson = db.get_lesson_pdf_file(token_data["lesson_id"])
+                    filename = lesson.get("pdf_filename", "fariks-test.pdf")
+                    self.send_binary(
+                        pdf_file.read(),
+                        "application/pdf",
+                        {
+                            "Content-Disposition": f'inline; filename="{filename}"',
+                            "Cache-Control": "private, max-age=300",
+                        },
+                    )
+                    return
+
                 if path.startswith("/api/admin/"):
                     if not self.is_admin(query):
                         self.send_json({"ok": False, "error": "Admin token noto'g'ri"}, status=401)
@@ -3532,6 +3722,16 @@ def make_handler(db: Database, telegram: TelegramClient):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def send_binary(self, content: bytes, content_type: str, extra_headers: dict[str, str] | None = None, status: int = 200) -> None:
+            self.send_response(status)
+            self.send_cors_headers()
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(content)))
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(content)
 
         def serve_static(self, path: str) -> None:
             if path in {"", "/"} or path.startswith("/test/") or path == "/admin":
@@ -3620,6 +3820,8 @@ def make_handler(db: Database, telegram: TelegramClient):
                 self.send_json({"ok": True, "data": db.admin_create_lesson(body)}, status=201)
             elif path == "/api/admin/lessons/video":
                 self.send_json({"ok": True, "data": db.admin_update_lesson_video(body.get("lesson_id"), body.get("video_url"))})
+            elif path == "/api/admin/lessons/pdf-test":
+                self.send_json({"ok": True, "data": db.admin_update_lesson_pdf_test(body)})
             elif path == "/api/admin/questions":
                 self.send_json({"ok": True, "data": db.admin_create_question(body)}, status=201)
             elif path == "/api/admin/settings/payment":

@@ -121,6 +121,13 @@ button {
   align-items: start;
 }
 
+.pdf-test-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+  align-items: start;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -270,6 +277,111 @@ h3 {
 
 .question-panel {
   overflow: hidden;
+}
+
+.pdf-panel {
+  overflow: hidden;
+}
+
+.pdf-head {
+  min-height: 74px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.pdf-head h2 {
+  margin-bottom: 0;
+}
+
+.pdf-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.pdf-frame {
+  width: 100%;
+  height: min(76vh, 840px);
+  display: block;
+  border: 0;
+  background: #eef3f8;
+}
+
+.pdf-answer-panel {
+  position: sticky;
+  top: 88px;
+  display: grid;
+  gap: 14px;
+}
+
+.pdf-current {
+  display: grid;
+  gap: 8px;
+}
+
+.pdf-current h2 {
+  margin: 0;
+  font-size: 26px;
+}
+
+.pdf-current p {
+  margin: 0;
+  line-height: 1.4;
+}
+
+.pdf-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pdf-option {
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.pdf-option.draft {
+  border-color: #f2c35b;
+  background: #fff6d8;
+  color: #8a5a00;
+}
+
+.pdf-option.final {
+  border-color: #94d6ae;
+  background: #e7f8ee;
+  color: var(--green);
+}
+
+.pdf-map {
+  max-height: 220px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.q-dot.drafted {
+  border-color: #f2c35b;
+  background: #fff6d8;
+  color: #8a5a00;
+}
+
+.compact-footer {
+  display: grid;
+  gap: 12px;
+  padding: 0;
+  border: 0;
 }
 
 .question-head {
@@ -1308,6 +1420,7 @@ tr:last-child td {
 
 @media (max-width: 920px) {
   .test-grid,
+  .pdf-test-grid,
   .admin-grid,
   .result-hero {
     grid-template-columns: 1fr;
@@ -1315,6 +1428,14 @@ tr:last-child td {
 
   .side-panel {
     position: static;
+  }
+
+  .pdf-answer-panel {
+    position: static;
+  }
+
+  .pdf-frame {
+    height: 62vh;
   }
 
   .stats-grid,
@@ -1429,8 +1550,18 @@ tr:last-child td {
   .split,
   .answer-pair,
   .answer-grid,
-  .preview-options {
+  .preview-options,
+  .pdf-options {
     grid-template-columns: 1fr;
+  }
+
+  .pdf-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .pdf-frame {
+    height: 56vh;
   }
 
   .admin-user-item,
